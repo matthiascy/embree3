@@ -352,6 +352,21 @@ fn test_aligned_vector_alloc() {
     }
 }
 
+#[test]
+#[ignore = "known to fail under Miri due to reading uninitialised memory; proof of the bug this \
+            test is designed to catch"]
+fn miri_aligned_vector_new_is_initialised() {
+    // `new` claims len elements are initialised over memory from `alloc::alloc`,
+    // which is undefined. Under Miri this reads uninitialised memory.
+    let v = AlignedVector::<u32>::new(8, 16);
+    let mut acc = 0u32;
+    for x in v.iter() {
+        acc = acc.wrapping_add(*x); // reading uninitialised T -> Miri error
+    }
+    std::hint::black_box(acc);
+    assert_eq!(v.len(), 8);
+}
+
 /// 16 bytes aligned with known size at compile time.
 #[repr(align(16))]
 pub struct AlignedArray<T, const N: usize>(pub [T; N]);
