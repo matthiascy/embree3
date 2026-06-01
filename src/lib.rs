@@ -20,6 +20,7 @@ use std::{
 
 mod buffer;
 mod bvh;
+mod callback;
 mod context;
 mod device;
 mod error;
