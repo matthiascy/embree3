@@ -1,0 +1,53 @@
+//! Proves dropping one Geometry clone does not free user-data the survivors
+//! still use.
+mod common;
+
+use embree::{Bounds, GeometryKind};
+use std::{cell::RefCell, rc::Rc};
+
+struct UserData {
+    magic: u32,
+}
+
+#[test]
+#[ignore = "known to fail on current code; proof of the bug this test is designed to catch"]
+fn dropping_one_clone_does_not_free_shared_user_data() {
+    let device = common::device();
+    let mut scene = device.create_scene().unwrap();
+
+    let seen: Rc<RefCell<Option<u32>>> = Rc::new(RefCell::new(None));
+    let seen_in_cb = seen.clone();
+
+    let mut geom = device.create_geometry(GeometryKind::USER).unwrap();
+    geom.set_user_primitive_count(1);
+    geom.set_owned_user_data(UserData { magic: 0x0BAD_F00D });
+    geom.set_bounds_function::<_, UserData>(move |bounds: &mut Bounds, _prim, _time, user| {
+        *bounds = Bounds {
+            lower_x: 0.0,
+            lower_y: 0.0,
+            lower_z: 0.0,
+            align0: 0.0,
+            upper_x: 1.0,
+            upper_y: 1.0,
+            upper_z: 1.0,
+            align1: 0.0,
+        };
+        *seen_in_cb.borrow_mut() = user.map(|u| u.magic);
+    });
+    geom.commit();
+
+    // Clone and drop one handle BEFORE the survivor is used.
+    let cloned = geom.clone();
+    drop(cloned);
+
+    scene.attach_geometry(&geom);
+    common::clobber_stack();
+    scene.commit(); // survivor's bounds callback reads the owned user data.
+
+    assert_eq!(
+        *seen.borrow(),
+        Some(0x0BAD_F00D),
+        "bounds callback must receive the owned user data, correctly typed, even if a clone was \
+         dropped"
+    );
+}
