@@ -96,7 +96,7 @@ impl<'a> Scene<'a> {
     /// from the scene, the implementation will reuse IDs in an implementation
     /// dependent way.
     pub fn attach_geometry(&mut self, geometry: &Geometry<'a>) -> u32 {
-        let id = unsafe { rtcAttachGeometry(self.handle, geometry.handle) };
+        let id = unsafe { rtcAttachGeometry(self.handle, geometry.shared.handle) };
         self.geometries.lock().unwrap().insert(id, geometry.clone());
         id
     }
@@ -114,7 +114,7 @@ impl<'a> Scene<'a> {
     /// This function is thread-safe, thus multiple threads can attach
     /// geometries to a scene at the same time.
     pub fn attach_geometry_by_id(&mut self, geometry: &Geometry<'a>, id: u32) {
-        unsafe { rtcAttachGeometryByID(self.handle, geometry.handle, id) };
+        unsafe { rtcAttachGeometryByID(self.handle, geometry.shared.handle, id) };
         self.geometries.lock().unwrap().insert(id, geometry.clone());
     }
 

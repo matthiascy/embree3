@@ -105,6 +105,28 @@ impl Default for GeometryData {
     }
 }
 
+/// All per-geometry state, heap-owned for the object's whole lifetime.
+///
+/// Its address is embree's `userPtr` (set in `new`), so it must never move.
+#[derive(Debug)]
+pub(crate) struct GeometryShared<'buf> {
+    pub(crate) device: Device,
+    pub(crate) handle: RTCGeometry,
+    pub(crate) kind: GeometryKind,
+    pub(crate) attachments: Mutex<HashMap<BufferUsage, Vec<AttachedBuffer<'buf>>>>,
+    pub(crate) data: GeometryData,
+}
+
+impl<'buf> Drop for GeometryShared<'buf> {
+    fn drop(&mut self) {
+        // Released exactly once, when the last wrapper (and the scene's clone)
+        // is gone.
+        unsafe {
+            rtcReleaseGeometry(self.handle);
+        }
+    }
+}
+
 /// Wrapper around an Embree geometry object.
 ///
 /// A new geometry is created using [`Device::create_geometry`] or
@@ -148,41 +170,9 @@ impl Default for GeometryData {
 ///
 /// It does not own the buffers that are bound to it, but it does own the
 /// geometry object itself.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Geometry<'buf> {
-    pub(crate) device: Device,
-    pub(crate) handle: RTCGeometry,
-    kind: GeometryKind,
-    /// Buffers that are attached to this geometry.
-    attachments: Arc<Mutex<HashMap<BufferUsage, Vec<AttachedBuffer<'buf>>>>>,
-    /// Data associated with this geometry.
-    data: Arc<GeometryData>,
-}
-
-impl<'buf> Clone for Geometry<'buf> {
-    fn clone(&self) -> Self {
-        unsafe {
-            rtcRetainGeometry(self.handle);
-        }
-        Self {
-            device: self.device.clone(),
-            handle: self.handle,
-            kind: self.kind,
-            attachments: self.attachments.clone(),
-            data: Arc::clone(&self.data),
-        }
-    }
-}
-
-impl<'buf> Drop for Geometry<'buf> {
-    fn drop(&mut self) {
-        // Owned user data is freed by GeometryData's own field drop when the last
-        // Arc ref goes away (NOT here), or a dropped clone would free data the
-        // survivors still use.
-        unsafe {
-            rtcReleaseGeometry(self.handle);
-        }
-    }
+    pub(crate) shared: Arc<GeometryShared<'buf>>,
 }
 
 impl<'buf> Geometry<'buf> {
@@ -207,27 +197,17 @@ impl<'buf> Geometry<'buf> {
     /// ```
     pub fn new<'dev>(device: &'dev Device, kind: GeometryKind) -> Result<Geometry<'buf>, Error> {
         let handle = unsafe { rtcNewGeometry(device.handle, kind) };
-        if handle.is_null() {
-            Err(device.get_error())
-        } else {
-            let data = Arc::new(GeometryData {
-                callbacks: Mutex::new(GeometryCallbacks::default()),
-                user_data: Mutex::new(None),
-            });
-            unsafe {
-                // SAFETY: stable pointer into the Arc's heap allocation; no extra strong count
-                // (so no leak), valid for as long as any Geometry clone, i.e. as long as
-                // embree holds the geometry.
-                rtcSetGeometryUserData(handle, Arc::as_ptr(&data) as *mut std::os::raw::c_void);
-            }
-            Ok(Geometry {
-                device: device.clone(),
-                handle,
-                kind,
-                attachments: Arc::new(Mutex::new(HashMap::default())),
-                data,
-            })
+        let shared = Arc::new(GeometryShared {
+            device: device.clone(),
+            handle,
+            kind,
+            attachments: Mutex::new(HashMap::new()),
+            data: GeometryData::default(),
+        });
+        unsafe {
+            rtcSetGeometryUserData(handle, Arc::as_ptr(&shared) as *mut _);
         }
+        Ok(Geometry { shared })
     }
 
     /// Disables the geometry.
@@ -238,7 +218,7 @@ impl<'buf> Geometry<'buf> {
     /// be committed using rtcCommitScene for the change to have effect.
     pub fn disable(&self) {
         unsafe {
-            rtcDisableGeometry(self.handle);
+            rtcDisableGeometry(self.shared.handle);
         }
     }
 
@@ -251,7 +231,7 @@ impl<'buf> Geometry<'buf> {
     /// committed using [`Geometry::commit`] for the change to have effect.
     pub fn enable(&self) {
         unsafe {
-            rtcEnableGeometry(self.handle);
+            rtcEnableGeometry(self.shared.handle);
         }
     }
 
@@ -264,13 +244,13 @@ impl<'buf> Geometry<'buf> {
     /// reference count is not increased by this function, so the caller must
     /// ensure that the handle is not used after the geometry object is
     /// destroyed.
-    pub unsafe fn handle(&self) -> RTCGeometry { self.handle }
+    pub unsafe fn handle(&self) -> RTCGeometry { self.shared.handle }
 
     /// Checks if the vertex attribute is allowed for the geometry.
     ///
     /// This function do not check if the slot of the vertex attribute.
     fn check_vertex_attribute(&self) -> Result<(), Error> {
-        match self.kind {
+        match self.shared.kind {
             GeometryKind::GRID | GeometryKind::USER | GeometryKind::INSTANCE => {
                 Err(Error::INVALID_OPERATION)
             }
@@ -324,7 +304,7 @@ impl<'buf> Geometry<'buf> {
                 offset,
                 size,
             } => {
-                let mut attachments = self.attachments.lock().unwrap();
+                let mut attachments = self.shared.attachments.lock().unwrap();
                 let bindings = attachments.entry(usage).or_insert_with(Vec::new);
                 match bindings.iter().position(|a| a.slot == slot) {
                     // If the slot is already bound, remove the old binding and
@@ -333,7 +313,7 @@ impl<'buf> Geometry<'buf> {
                         bindings.remove(i);
                         unsafe {
                             rtcSetGeometryBuffer(
-                                self.handle,
+                                self.shared.handle,
                                 usage,
                                 slot,
                                 format,
@@ -359,7 +339,7 @@ impl<'buf> Geometry<'buf> {
                     None => {
                         unsafe {
                             rtcSetGeometryBuffer(
-                                self.handle,
+                                self.shared.handle,
                                 usage,
                                 slot,
                                 format,
@@ -387,7 +367,7 @@ impl<'buf> Geometry<'buf> {
             BufferSlice::User {
                 ptr, offset, size, ..
             } => {
-                let mut attachments = self.attachments.lock().unwrap();
+                let mut attachments = self.shared.attachments.lock().unwrap();
                 let bindings = attachments.entry(usage).or_insert_with(Vec::new);
                 match bindings.iter().position(|a| a.slot == slot) {
                     // If the slot is already bound, remove the old binding and
@@ -396,7 +376,7 @@ impl<'buf> Geometry<'buf> {
                         bindings.remove(i);
                         unsafe {
                             rtcSetSharedGeometryBuffer(
-                                self.handle,
+                                self.shared.handle,
                                 usage,
                                 slot,
                                 format,
@@ -423,7 +403,7 @@ impl<'buf> Geometry<'buf> {
                     None => {
                         unsafe {
                             rtcSetSharedGeometryBuffer(
-                                self.handle,
+                                self.shared.handle,
                                 usage,
                                 slot,
                                 format,
@@ -490,14 +470,14 @@ impl<'buf> Geometry<'buf> {
             self.check_vertex_attribute()?;
         }
         {
-            let mut attachments = self.attachments.lock().unwrap();
+            let mut attachments = self.shared.attachments.lock().unwrap();
             let bindings = attachments.entry(usage).or_insert_with(Vec::new);
             if !bindings.iter().any(|a| a.slot == slot) {
                 let raw_ptr = unsafe {
-                    rtcSetNewGeometryBuffer(self.handle, usage, slot, format, stride, count)
+                    rtcSetNewGeometryBuffer(self.shared.handle, usage, slot, format, stride, count)
                 };
                 if raw_ptr.is_null() {
-                    Err(self.device.get_error())
+                    Err(self.shared.device.get_error())
                 } else {
                     let slice = BufferSlice::GeometryLocal {
                         ptr: raw_ptr,
@@ -520,7 +500,7 @@ impl<'buf> Geometry<'buf> {
 
     /// Returns the buffer bound to the given slot and usage.
     pub fn get_buffer(&self, usage: BufferUsage, slot: u32) -> Option<BufferSlice<'_>> {
-        let attachments = self.attachments.lock().unwrap();
+        let attachments = self.shared.attachments.lock().unwrap();
         attachments
             .get(&usage)
             .and_then(|v| v.iter().find(|a| a.slot == slot))
@@ -536,16 +516,16 @@ impl<'buf> Geometry<'buf> {
     /// first [`Scene::commit`] call.
     pub fn update_buffer(&self, usage: BufferUsage, slot: u32) {
         unsafe {
-            rtcUpdateGeometryBuffer(self.handle, usage, slot);
+            rtcUpdateGeometryBuffer(self.shared.handle, usage, slot);
         }
     }
 
     /// Returns the type of geometry of this geometry.
-    pub fn kind(&self) -> GeometryKind { self.kind }
+    pub fn kind(&self) -> GeometryKind { self.shared.kind }
 
     pub fn commit(&mut self) {
         unsafe {
-            rtcCommitGeometry(self.handle);
+            rtcCommitGeometry(self.shared.handle);
         }
     }
 
@@ -573,7 +553,7 @@ impl<'buf> Geometry<'buf> {
     ///   only the vertex buffer.
     pub fn set_build_quality(&mut self, quality: BuildQuality) {
         unsafe {
-            rtcSetGeometryBuildQuality(self.handle, quality);
+            rtcSetGeometryBuildQuality(self.shared.handle, quality);
         }
     }
 
@@ -664,20 +644,20 @@ impl<'buf> Geometry<'buf> {
         // is dropped only after the new closure is installed).
         unsafe {
             rtcSetGeometryIntersectFilterFunction(
-                self.handle,
+                self.shared.handle,
                 intersect_filter_function::<F, D, C>(),
             );
         }
 
-        self.data.callbacks.lock().unwrap().intersect_filter = Some(erased);
+        self.shared.data.callbacks.lock().unwrap().intersect_filter = Some(erased);
     }
 
     /// Unsets the intersection filter function for the geometry.
     pub fn unset_intersect_filter_function(&mut self) {
         unsafe {
-            rtcSetGeometryIntersectFilterFunction(self.handle, None);
+            rtcSetGeometryIntersectFilterFunction(self.shared.handle, None);
         }
-        self.data.callbacks.lock().unwrap().intersect_filter = None;
+        self.shared.data.callbacks.lock().unwrap().intersect_filter = None;
     }
 
     /// Sets the occlusion filter for the geometry.
@@ -722,19 +702,19 @@ impl<'buf> Geometry<'buf> {
         // is dropped only after the new closure is installed).
         unsafe {
             rtcSetGeometryOccludedFilterFunction(
-                self.handle,
+                self.shared.handle,
                 occluded_filter_function::<F, D, C>(),
             );
         }
-        self.data.callbacks.lock().unwrap().occluded_filter = Some(erased);
+        self.shared.data.callbacks.lock().unwrap().occluded_filter = Some(erased);
     }
 
     /// Unsets the occlusion filter function for the geometry.
     pub fn unset_occluded_filter_function(&mut self) {
         unsafe {
-            rtcSetGeometryOccludedFilterFunction(self.handle, None);
+            rtcSetGeometryOccludedFilterFunction(self.shared.handle, None);
         }
-        self.data.callbacks.lock().unwrap().occluded_filter = None;
+        self.shared.data.callbacks.lock().unwrap().occluded_filter = None;
     }
 
     // TODO(yang): how to handle the closure? RTCPointQueryFunctionArguments has a
@@ -816,17 +796,17 @@ impl<'buf> Geometry<'buf> {
     /// point traversal of triangle meshes using instancing and user defined
     /// instancing see the tutorial *ClosestPoint*.
     pub unsafe fn set_point_query_function(&mut self, query_fn: RTCPointQueryFunction) {
-        rtcSetGeometryPointQueryFunction(self.handle, query_fn);
+        rtcSetGeometryPointQueryFunction(self.shared.handle, query_fn);
     }
 
     /// Unsets the point query function for the geometry.
     pub fn unset_point_query_function(&mut self) {
         unsafe {
-            rtcSetGeometryPointQueryFunction(self.handle, None);
+            rtcSetGeometryPointQueryFunction(self.shared.handle, None);
         }
-        // TODO: clear a stored point-query closure in `self.data.callbacks`
-        // once `set_point_query_function` accepts a Rust closure
-        // instead of a raw fn.
+        // TODO: clear a stored point-query closure in
+        // `self.shared.data.callbacks` once `set_point_query_function`
+        // accepts a Rust closure instead of a raw fn.
     }
 
     /// Sets the tessellation rate for a subdivision mesh or flat curves.
@@ -835,13 +815,13 @@ impl<'buf> Geometry<'buf> {
     /// quads per curve segment. For subdivision surfaces, the tessellation
     /// rate specifies the number of quads along each edge.
     pub fn set_tessellation_rate(&mut self, rate: f32) {
-        match self.kind {
+        match self.shared.kind {
             GeometryKind::SUBDIVISION
             | GeometryKind::FLAT_LINEAR_CURVE
             | GeometryKind::FLAT_BEZIER_CURVE
             | GeometryKind::ROUND_LINEAR_CURVE
             | GeometryKind::ROUND_BEZIER_CURVE => unsafe {
-                rtcSetGeometryTessellationRate(self.handle, rate);
+                rtcSetGeometryTessellationRate(self.shared.handle, rate);
             },
             _ => panic!(
                 "Geometry::set_tessellation_rate is only supported for subdivision meshes and \
@@ -866,7 +846,7 @@ impl<'buf> Geometry<'buf> {
     /// device property using [`Device::get_property`].
     pub fn set_mask(&mut self, mask: u32) {
         unsafe {
-            rtcSetGeometryMask(self.handle, mask);
+            rtcSetGeometryMask(self.shared.handle, mask);
         }
     }
 
@@ -886,7 +866,7 @@ impl<'buf> Geometry<'buf> {
     /// intersect the motion-blurred geometry at the ray time.
     pub fn set_time_step_count(&mut self, count: u32) {
         unsafe {
-            rtcSetGeometryTimeStepCount(self.handle, count);
+            rtcSetGeometryTimeStepCount(self.shared.handle, count);
         }
     }
 
@@ -916,7 +896,7 @@ impl<'buf> Geometry<'buf> {
     /// see how to define the time steps for the specified time range.
     pub fn set_time_range(&mut self, start: f32, end: f32) {
         unsafe {
-            rtcSetGeometryTimeRange(self.handle, start, end);
+            rtcSetGeometryTimeRange(self.shared.handle, start, end);
         }
     }
 
@@ -954,7 +934,7 @@ impl<'buf> Geometry<'buf> {
     where
         D: UserData,
     {
-        *self.data.user_data.lock().unwrap() = Some(UserDataSlot {
+        *self.shared.data.user_data.lock().unwrap() = Some(UserDataSlot {
             data: user_data as *mut D as *mut std::os::raw::c_void,
             type_id: TypeId::of::<D>(),
             owner: None,
@@ -981,7 +961,7 @@ impl<'buf> Geometry<'buf> {
         let owner: Box<dyn Any + Send + Sync> = unsafe { Box::from_raw(raw) };
 
         // Replacing the Option drops any previous owner, freeing old owned data once.
-        *self.data.user_data.lock().unwrap() = Some(UserDataSlot {
+        *self.shared.data.user_data.lock().unwrap() = Some(UserDataSlot {
             data: raw as *mut D as *mut std::os::raw::c_void,
             type_id: TypeId::of::<D>(),
             owner: Some(owner),
@@ -1012,7 +992,7 @@ impl<'buf> Geometry<'buf> {
         // Validate and copy the pointer out from under the lock, then form a reference
         // tied to `&self` (the user data outlives the geometry's borrow).
         let ptr: *const D = {
-            let user_data = self.data.user_data.lock().unwrap();
+            let user_data = self.shared.data.user_data.lock().unwrap();
             match user_data.as_ref() {
                 Some(ud) if !ud.data.is_null() && ud.type_id == TypeId::of::<D>() => {
                     ud.data as *const D
@@ -1041,7 +1021,7 @@ impl<'buf> Geometry<'buf> {
         D: UserData,
     {
         let ptr: *mut D = {
-            let user_data = self.data.user_data.lock().unwrap();
+            let user_data = self.shared.data.user_data.lock().unwrap();
             match user_data.as_ref() {
                 Some(ud) if !ud.data.is_null() && ud.type_id == TypeId::of::<D>() => {
                     ud.data as *mut D
@@ -1056,11 +1036,11 @@ impl<'buf> Geometry<'buf> {
 
     /// Sets the number of primitives of a user-defined geometry.
     pub fn set_user_primitive_count(&mut self, count: u32) {
-        match self.kind {
+        match self.shared.kind {
             GeometryKind::USER => {
                 // Update the primitive count.
                 unsafe {
-                    rtcSetGeometryUserPrimitiveCount(self.handle, count);
+                    rtcSetGeometryUserPrimitiveCount(self.shared.handle, count);
                 }
             }
             // Primitive count is meaningful only for user-defined geometry; a
@@ -1082,13 +1062,13 @@ impl<'buf> Geometry<'buf> {
     ///
     /// * `count` - The number of vertex attribute slots.
     pub fn set_vertex_attribute_count(&mut self, count: u32) {
-        match self.kind {
+        match self.shared.kind {
             // Vertex attributes are not supported by these kinds; no-op.
             GeometryKind::GRID | GeometryKind::USER | GeometryKind::INSTANCE => {}
             _ => {
                 // Update the vertex attribute count.
                 unsafe {
-                    rtcSetGeometryVertexAttributeCount(self.handle, count);
+                    rtcSetGeometryVertexAttributeCount(self.shared.handle, count);
                 }
             }
         }
@@ -1112,7 +1092,11 @@ impl<'buf> Geometry<'buf> {
     /// multiple textures onto one subdivision geometry.
     pub fn set_vertex_attribute_topology(&self, vertex_attribute_id: u32, topology_id: u32) {
         unsafe {
-            rtcSetGeometryVertexAttributeTopology(self.handle, vertex_attribute_id, topology_id);
+            rtcSetGeometryVertexAttributeTopology(
+                self.shared.handle,
+                vertex_attribute_id,
+                topology_id,
+            );
         }
     }
 
@@ -1132,7 +1116,7 @@ impl<'buf> Geometry<'buf> {
     /// All output arrays must be padded to 16 bytes.
     pub fn interpolate(&self, input: InterpolateInput, output: &mut InterpolateOutput) {
         let args = RTCInterpolateArguments {
-            geometry: self.handle,
+            geometry: self.shared.handle,
             primID: input.prim_id,
             u: input.u,
             v: input.v,
@@ -1188,7 +1172,7 @@ impl<'buf> Geometry<'buf> {
     pub fn interpolate_n(&self, input: InterpolateNInput, output: &mut InterpolateOutput) {
         assert_eq!(input.n % 4, 0, "N must be a multiple of 4!");
         let args = RTCInterpolateNArguments {
-            geometry: self.handle,
+            geometry: self.shared.handle,
             N: input.n,
             valid: input
                 .valid
@@ -1276,15 +1260,15 @@ impl<'buf> Geometry<'buf> {
         D: UserData,
         F: Fn(&mut Bounds, u32, u32, Option<&D>) + Send + Sync + 'static,
     {
-        match self.kind {
+        match self.shared.kind {
             GeometryKind::USER => unsafe {
                 let erased = ErasedFn::new(bounds);
                 rtcSetGeometryBoundsFunction(
-                    self.handle,
+                    self.shared.handle,
                     bounds_function::<F, D>(),
                     ptr::null_mut(),
                 );
-                self.data.callbacks.lock().unwrap().user_bounds = Some(erased);
+                self.shared.data.callbacks.lock().unwrap().user_bounds = Some(erased);
             },
             // Bounds functions apply only to user geometry; ignored otherwise.
             _ => {}
@@ -1294,10 +1278,10 @@ impl<'buf> Geometry<'buf> {
     /// Unsets the callback to calculate the bounding box of user-defined
     /// geometry.
     pub fn unset_bounds_function(&mut self) {
-        match self.kind {
+        match self.shared.kind {
             GeometryKind::USER => unsafe {
-                rtcSetGeometryBoundsFunction(self.handle, None, ptr::null_mut());
-                self.data.callbacks.lock().unwrap().user_bounds = None;
+                rtcSetGeometryBoundsFunction(self.shared.handle, None, ptr::null_mut());
+                self.shared.data.callbacks.lock().unwrap().user_bounds = None;
             },
             _ => panic!("Only user geometries can have a bounds function!"),
         }
@@ -1399,11 +1383,14 @@ impl<'buf> Geometry<'buf> {
             + Sync
             + 'static,
     {
-        match self.kind {
+        match self.shared.kind {
             GeometryKind::USER => unsafe {
                 let erased = ErasedFn::new(intersect);
-                rtcSetGeometryIntersectFunction(self.handle, intersect_function::<F, D, C>());
-                self.data.callbacks.lock().unwrap().user_intersect = Some(erased);
+                rtcSetGeometryIntersectFunction(
+                    self.shared.handle,
+                    intersect_function::<F, D, C>(),
+                );
+                self.shared.data.callbacks.lock().unwrap().user_intersect = Some(erased);
             },
             // Intersect functions apply only to user geometry; ignored otherwise.
             _ => {}
@@ -1412,10 +1399,10 @@ impl<'buf> Geometry<'buf> {
 
     /// Unsets the callback to intersect user-defined geometry.
     pub fn unset_intersect_function(&mut self) {
-        match self.kind {
+        match self.shared.kind {
             GeometryKind::USER => unsafe {
-                rtcSetGeometryIntersectFunction(self.handle, None);
-                self.data.callbacks.lock().unwrap().user_intersect = None;
+                rtcSetGeometryIntersectFunction(self.shared.handle, None);
+                self.shared.data.callbacks.lock().unwrap().user_intersect = None;
             },
             // Intersect functions apply only to user geometry; ignored otherwise.
             _ => {}
@@ -1463,13 +1450,16 @@ impl<'buf> Geometry<'buf> {
             + Sync
             + 'static,
     {
-        match self.kind {
+        match self.shared.kind {
             GeometryKind::USER => {
                 let erased = ErasedFn::new(occluded);
                 unsafe {
-                    rtcSetGeometryOccludedFunction(self.handle, occluded_function::<F, D, C>())
+                    rtcSetGeometryOccludedFunction(
+                        self.shared.handle,
+                        occluded_function::<F, D, C>(),
+                    )
                 };
-                self.data.callbacks.lock().unwrap().user_occluded = Some(erased);
+                self.shared.data.callbacks.lock().unwrap().user_occluded = Some(erased);
             }
             // Occluded functions apply only to user geometry; ignored otherwise.
             _ => {}
@@ -1478,10 +1468,10 @@ impl<'buf> Geometry<'buf> {
 
     /// Unsets the callback to occlude user-defined geometry.
     pub fn unset_occluded_function(&mut self) {
-        match self.kind {
+        match self.shared.kind {
             GeometryKind::USER => unsafe {
-                rtcSetGeometryOccludedFunction(self.handle, None);
-                self.data.callbacks.lock().unwrap().user_occluded = None;
+                rtcSetGeometryOccludedFunction(self.shared.handle, None);
+                self.shared.data.callbacks.lock().unwrap().user_occluded = None;
             },
             // Occluded functions apply only to user geometry; ignored otherwise.
             _ => {}
@@ -1490,9 +1480,9 @@ impl<'buf> Geometry<'buf> {
 
     /// Sets the number of primitives of a user-defined geometry.
     pub fn set_primitive_count(&mut self, count: u32) {
-        match self.kind {
+        match self.shared.kind {
             GeometryKind::USER => unsafe {
-                rtcSetGeometryUserPrimitiveCount(self.handle, count);
+                rtcSetGeometryUserPrimitiveCount(self.shared.handle, count);
             },
             _ => panic!("Only user geometries can have a primitive count!"),
         }
@@ -1523,9 +1513,9 @@ impl<'buf> Geometry<'buf> {
     /// to their location during subdivision. This way all patches are linearly
     /// interpolated.
     pub fn set_subdivision_mode(&self, topology_id: u32, mode: SubdivisionMode) {
-        match self.kind {
+        match self.shared.kind {
             GeometryKind::SUBDIVISION => unsafe {
-                rtcSetGeometrySubdivisionMode(self.handle, topology_id, mode)
+                rtcSetGeometrySubdivisionMode(self.shared.handle, topology_id, mode)
             },
             _ => panic!("Only subdivision geometries can have a subdivision mode!"),
         }
@@ -1541,9 +1531,9 @@ impl<'buf> Geometry<'buf> {
     /// [`Geometry::set_subdivision_mode`] and by setting an index buffer
     /// ([`BufferUsage::INDEX`]) using the topology ID as the buffer slot.
     pub fn set_topology_count(&mut self, count: u32) {
-        match self.kind {
+        match self.shared.kind {
             GeometryKind::SUBDIVISION => unsafe {
-                rtcSetGeometryTopologyCount(self.handle, count);
+                rtcSetGeometryTopologyCount(self.shared.handle, count);
             },
             _ => panic!("Only subdivision geometries can have multiple topologies!"),
         }
@@ -1555,9 +1545,9 @@ impl<'buf> Geometry<'buf> {
     /// of a subdivision geometry share the same face buffer the function does
     /// not depend on the topology ID.
     pub fn get_first_half_edge(&self, face_id: u32) -> u32 {
-        match self.kind {
+        match self.shared.kind {
             GeometryKind::SUBDIVISION => unsafe {
-                rtcGetGeometryFirstHalfEdge(self.handle, face_id)
+                rtcGetGeometryFirstHalfEdge(self.shared.handle, face_id)
             },
             _ => panic!("Only subdivision geometries can have half edges!"),
         }
@@ -1569,8 +1559,10 @@ impl<'buf> Geometry<'buf> {
     /// of a subdivision geometry share the same face buffer the function does
     /// not depend on the topology ID.
     pub fn get_face(&self, half_edge_id: u32) -> u32 {
-        match self.kind {
-            GeometryKind::SUBDIVISION => unsafe { rtcGetGeometryFace(self.handle, half_edge_id) },
+        match self.shared.kind {
+            GeometryKind::SUBDIVISION => unsafe {
+                rtcGetGeometryFace(self.shared.handle, half_edge_id)
+            },
             _ => panic!("Only subdivision geometries can have half edges!"),
         }
     }
@@ -1581,9 +1573,9 @@ impl<'buf> Geometry<'buf> {
     /// of a subdivision geometry share the same face buffer the function does
     /// not depend on the topology ID.
     pub fn get_next_half_edge(&self, half_edge_id: u32) -> u32 {
-        match self.kind {
+        match self.shared.kind {
             GeometryKind::SUBDIVISION => unsafe {
-                rtcGetGeometryNextHalfEdge(self.handle, half_edge_id)
+                rtcGetGeometryNextHalfEdge(self.shared.handle, half_edge_id)
             },
             _ => panic!("Only subdivision geometries can have half edges!"),
         }
@@ -1591,9 +1583,9 @@ impl<'buf> Geometry<'buf> {
 
     /// Returns the previous half edge of some half edge.
     pub fn get_previous_half_edge(&self, half_edge_id: u32) -> u32 {
-        match self.kind {
+        match self.shared.kind {
             GeometryKind::SUBDIVISION => unsafe {
-                rtcGetGeometryPreviousHalfEdge(self.handle, half_edge_id)
+                rtcGetGeometryPreviousHalfEdge(self.shared.handle, half_edge_id)
             },
             _ => panic!("Only subdivision geometries can have half edges!"),
         }
@@ -1601,9 +1593,9 @@ impl<'buf> Geometry<'buf> {
 
     /// Returns the opposite half edge of some half edge.
     pub fn get_opposite_half_edge(&self, topology_id: u32, edge_id: u32) -> u32 {
-        match self.kind {
+        match self.shared.kind {
             GeometryKind::SUBDIVISION => unsafe {
-                rtcGetGeometryOppositeHalfEdge(self.handle, topology_id, edge_id)
+                rtcGetGeometryOppositeHalfEdge(self.shared.handle, topology_id, edge_id)
             },
             _ => panic!("Only subdivision geometries can have half edges!"),
         }
@@ -1656,13 +1648,16 @@ impl<'buf> Geometry<'buf> {
         D: UserData,
         F: for<'a> Fn(RTCGeometry, Vertices<'a>, u32, u32, Option<&D>) + Send + Sync + 'static,
     {
-        match self.kind {
+        match self.shared.kind {
             GeometryKind::SUBDIVISION => {
                 let erased = ErasedFn::new(displacement);
                 unsafe {
-                    rtcSetGeometryDisplacementFunction(self.handle, displacement_function::<F, D>())
+                    rtcSetGeometryDisplacementFunction(
+                        self.shared.handle,
+                        displacement_function::<F, D>(),
+                    )
                 }
-                self.data.callbacks.lock().unwrap().displacement = Some(erased);
+                self.shared.data.callbacks.lock().unwrap().displacement = Some(erased);
             }
             // Displacement functions apply only to subdivision geometry; ignored
             // otherwise.
@@ -1672,10 +1667,10 @@ impl<'buf> Geometry<'buf> {
 
     /// Removes the displacement function for a subdivision geometry.
     pub fn unset_displacement_function(&mut self) {
-        match self.kind {
+        match self.shared.kind {
             GeometryKind::SUBDIVISION => unsafe {
-                rtcSetGeometryDisplacementFunction(self.handle, None);
-                self.data.callbacks.lock().unwrap().displacement = None;
+                rtcSetGeometryDisplacementFunction(self.shared.handle, None);
+                self.shared.data.callbacks.lock().unwrap().displacement = None;
             },
             _ => panic!("Only subdivision geometries can have displacement functions!"),
         }
@@ -1683,9 +1678,9 @@ impl<'buf> Geometry<'buf> {
 
     /// Sets the instanced scene of an instance geometry.
     pub fn set_instanced_scene(&mut self, scene: &Scene) {
-        match self.kind {
+        match self.shared.kind {
             GeometryKind::INSTANCE => unsafe {
-                rtcSetGeometryInstancedScene(self.handle, scene.handle)
+                rtcSetGeometryInstancedScene(self.shared.handle, scene.handle)
             },
             _ => panic!("Only instance geometries can have instanced scenes!"),
         }
@@ -1696,11 +1691,11 @@ impl<'buf> Geometry<'buf> {
     ///
     /// The transformation is returned as a 4x4 column-major matrix.
     pub fn get_transform(&mut self, time: f32) -> [f32; 16] {
-        match self.kind {
+        match self.shared.kind {
             GeometryKind::INSTANCE => unsafe {
                 let mut transform = [0.0; 16];
                 rtcGetGeometryTransform(
-                    self.handle,
+                    self.shared.handle,
                     time,
                     Format::FLOAT4X4_COLUMN_MAJOR,
                     transform.as_mut_ptr() as *mut _,
@@ -1716,10 +1711,10 @@ impl<'buf> Geometry<'buf> {
     ///
     /// The transformation is specified as a 4x4 column-major matrix.
     pub fn set_transform(&mut self, time_step: u32, transform: &[f32; 16]) {
-        match self.kind {
+        match self.shared.kind {
             GeometryKind::INSTANCE => unsafe {
                 rtcSetGeometryTransform(
-                    self.handle,
+                    self.shared.handle,
                     time_step,
                     Format::FLOAT4X4_COLUMN_MAJOR,
                     transform.as_ptr() as *const _,
@@ -1737,10 +1732,10 @@ impl<'buf> Geometry<'buf> {
         time_step: u32,
         transform: &QuaternionDecomposition,
     ) {
-        match self.kind {
+        match self.shared.kind {
             GeometryKind::INSTANCE => unsafe {
                 rtcSetGeometryTransformQuaternion(
-                    self.handle,
+                    self.shared.handle,
                     time_step,
                     transform as &QuaternionDecomposition as *const _,
                 );
@@ -2051,9 +2046,10 @@ where
             + Sync
             + 'static,
     {
-        let data = &*((*args).geometryUserPtr as *const GeometryData);
+        let shared = &*((*args).geometryUserPtr as *const GeometryShared);
 
-        let cb_ptr = data
+        let cb_ptr = shared
+            .data
             .callbacks
             .lock()
             .unwrap()
@@ -2063,7 +2059,7 @@ where
 
         let Some(cb_ptr) = cb_ptr else { return };
 
-        let (user_ptr, user_tid) = match data.user_data.lock().unwrap().as_ref() {
+        let (user_ptr, user_tid) = match shared.data.user_data.lock().unwrap().as_ref() {
             Some(u) => (u.data, u.type_id),
             None => (std::ptr::null_mut(), TypeId::of::<()>()),
         };
@@ -2116,8 +2112,9 @@ where
             + Sync
             + 'static,
     {
-        let data = &*((*args).geometryUserPtr as *const GeometryData);
-        let cb_ptr = data
+        let shared = &*((*args).geometryUserPtr as *const GeometryShared);
+        let cb_ptr = shared
+            .data
             .callbacks
             .lock()
             .unwrap()
@@ -2126,7 +2123,7 @@ where
             .map(|e| e.as_ptr());
         let Some(cb_ptr) = cb_ptr else { return };
 
-        let (user_ptr, user_tid) = match data.user_data.lock().unwrap().as_ref() {
+        let (user_ptr, user_tid) = match shared.data.user_data.lock().unwrap().as_ref() {
             Some(u) => (u.data, u.type_id),
             None => (std::ptr::null_mut(), TypeId::of::<()>()),
         };
@@ -2174,15 +2171,16 @@ where
         D: UserData,
         F: Fn(&mut Bounds, u32, u32, Option<&D>) + Send + Sync + 'static,
     {
-        let data = &*((*args).geometryUserPtr as *const GeometryData);
-        let cb_ptr = data
+        let shared = &*((*args).geometryUserPtr as *const GeometryShared);
+        let cb_ptr = shared
+            .data
             .callbacks
             .lock()
             .unwrap()
             .user_bounds
             .as_ref()
             .map(|e| e.as_ptr());
-        let (user_ptr, user_tid) = match data.user_data.lock().unwrap().as_ref() {
+        let (user_ptr, user_tid) = match shared.data.user_data.lock().unwrap().as_ref() {
             Some(u) => (u.data, u.type_id),
             None => (std::ptr::null_mut(), TypeId::of::<()>()),
         };
@@ -2238,8 +2236,9 @@ where
             + Sync
             + 'static,
     {
-        let data = &*((*args).geometryUserPtr as *const GeometryData);
-        let cb_ptr = data
+        let shared = &*((*args).geometryUserPtr as *const GeometryShared);
+        let cb_ptr = shared
+            .data
             .callbacks
             .lock()
             .unwrap()
@@ -2247,7 +2246,7 @@ where
             .as_ref()
             .map(|e| e.as_ptr());
         let Some(cb_ptr) = cb_ptr else { return };
-        let (user_ptr, user_tid) = match data.user_data.lock().unwrap().as_ref() {
+        let (user_ptr, user_tid) = match shared.data.user_data.lock().unwrap().as_ref() {
             Some(u) => (u.data, u.type_id),
             None => (std::ptr::null_mut(), TypeId::of::<()>()),
         };
@@ -2296,8 +2295,9 @@ where
             + Sync
             + 'static,
     {
-        let data = &*((*args).geometryUserPtr as *const GeometryData);
-        let cb_ptr = data
+        let shared = &*((*args).geometryUserPtr as *const GeometryShared);
+        let cb_ptr = shared
+            .data
             .callbacks
             .lock()
             .unwrap()
@@ -2305,7 +2305,7 @@ where
             .as_ref()
             .map(|e| e.as_ptr());
         let Some(cb_ptr) = cb_ptr else { return };
-        let (user_ptr, user_tid) = match data.user_data.lock().unwrap().as_ref() {
+        let (user_ptr, user_tid) = match shared.data.user_data.lock().unwrap().as_ref() {
             Some(u) => (u.data, u.type_id),
             None => (std::ptr::null_mut(), TypeId::of::<()>()),
         };
@@ -2419,8 +2419,9 @@ where
         D: UserData,
         F: for<'a> Fn(RTCGeometry, Vertices<'a>, u32, u32, Option<&D>) + Send + Sync + 'static,
     {
-        let data = &*((*args).geometryUserPtr as *const GeometryData);
-        let cb_ptr = data
+        let shared = &*((*args).geometryUserPtr as *const GeometryShared);
+        let cb_ptr = shared
+            .data
             .callbacks
             .lock()
             .unwrap()
@@ -2428,7 +2429,7 @@ where
             .as_ref()
             .map(|e| e.as_ptr());
         let Some(cb_ptr) = cb_ptr else { return };
-        let (user_ptr, user_tid) = match data.user_data.lock().unwrap().as_ref() {
+        let (user_ptr, user_tid) = match shared.data.user_data.lock().unwrap().as_ref() {
             Some(u) => (u.data, u.type_id),
             None => (std::ptr::null_mut(), TypeId::of::<()>()),
         };
