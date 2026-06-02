@@ -85,6 +85,17 @@ pub type SubdivisionMode = sys::RTCSubdivisionMode;
 /// The type of a geometry, used to determine which geometry type to create.
 pub type GeometryKind = sys::RTCGeometryType;
 
+/// Marker trait for types usable as callback user data: geometry user data
+/// ([`Geometry::set_user_data`]) or point-query user data
+/// ([`Scene::point_query`]).
+///
+/// The blanket impl covers every `Send + Sync + 'static` type. The bounds are
+/// required because callbacks may read the data from embree worker threads
+/// (`Send + Sync`) for as long as the geometry/scene lives (`'static`).
+pub trait UserData: Send + Sync + 'static {}
+
+impl<T: Send + Sync + 'static> UserData for T {}
+
 /// Validity mask value for rays or hits in the filter functions.
 /// See [`ValidityN`].
 #[repr(i32)]

@@ -1,7 +1,7 @@
 use crate::{
     callback::ErasedFn, AsIntersectContext, Bounds, BuildQuality, Error, PointQuery,
     PointQueryContext, Ray, Ray16, Ray8, RayHit, RayHit16, RayHit8, RayHitNp, RayHitPacket,
-    RayPacket, SceneFlags,
+    RayPacket, SceneFlags, UserData,
 };
 use std::{
     any::TypeId,
@@ -324,11 +324,11 @@ impl<'a> Scene<'a> {
         query_fn: Option<F>,
         mut user_data: Option<D>,
     ) where
-        D: UserPointQueryData,
+        D: UserData,
         F: FnMut(&mut PointQuery, &mut PointQueryContext, Option<&mut D>, u32, u32, f32) -> bool,
     {
         let mut query_fn = query_fn;
-        let mut user = PointQueryUserData {
+        let mut user = PointQueryCallbackData {
             scene_closure: query_fn
                 .as_mut()
                 .map_or(ptr::null_mut(), |f| f as *mut F as *mut _),
@@ -348,7 +348,7 @@ impl<'a> Scene<'a> {
                 } else {
                     None
                 },
-                &mut user as *mut PointQueryUserData as *mut _,
+                &mut user as *mut PointQueryCallbackData as *mut _,
             );
         }
     }
@@ -903,20 +903,16 @@ impl<'a> Scene<'a> {
     }
 }
 
-pub trait UserPointQueryData: Sized + Send + Sync + 'static {}
-
-impl<T> UserPointQueryData for T where T: Sized + Send + Sync + 'static {}
-
 /// User data for callback of [`Scene::point_query`] and
 /// [`Geometry::set_point_query_function`].
 #[derive(Debug)]
-pub(crate) struct PointQueryUserData {
+pub(crate) struct PointQueryCallbackData {
     pub scene_closure: *mut std::os::raw::c_void,
     pub data: *mut std::os::raw::c_void,
     pub type_id: TypeId,
 }
 
-impl Default for PointQueryUserData {
+impl Default for PointQueryCallbackData {
     fn default() -> Self {
         Self {
             scene_closure: ptr::null_mut(),
@@ -947,15 +943,15 @@ where
 /// callback.
 fn point_query_function<F, D>() -> RTCPointQueryFunction
 where
-    D: UserPointQueryData,
+    D: UserData,
     F: FnMut(&mut PointQuery, &mut PointQueryContext, Option<&mut D>, u32, u32, f32) -> bool,
 {
     unsafe extern "C" fn inner<F, D>(args: *mut RTCPointQueryFunctionArguments) -> bool
     where
-        D: UserPointQueryData,
+        D: UserData,
         F: FnMut(&mut PointQuery, &mut PointQueryContext, Option<&mut D>, u32, u32, f32) -> bool,
     {
-        let user_data = &mut *((*args).userPtr as *mut PointQueryUserData);
+        let user_data = &mut *((*args).userPtr as *mut PointQueryCallbackData);
         let cb_ptr = user_data.scene_closure as *mut F;
         if !cb_ptr.is_null() {
             let data = {

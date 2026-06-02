@@ -10,7 +10,7 @@ use std::{
 use crate::{
     callback::ErasedFn, sys::*, AsIntersectContext, Bounds, BufferSlice, BufferUsage, BuildQuality,
     Device, Error, Format, GeometryKind, HitN, QuaternionDecomposition, RayHitN, RayN, Scene,
-    SubdivisionMode,
+    SubdivisionMode, UserData,
 };
 
 use std::{
@@ -31,17 +31,12 @@ pub(crate) struct AttachedBuffer<'src> {
     source: BufferSlice<'src>,
 }
 
-/// Trait for user-defined data that can be attached to a geometry.
-pub trait UserGeometryData: Sized + Send + Sync + 'static {}
-
-impl<T> UserGeometryData for T where T: Sized + Send + Sync + 'static {}
-
 /// User-defined data for a geometry.
 ///
 /// This contains the pointer to the user-defined data and the type ID of the
 /// user-defined data (which is used to check the type when getting the data).
 #[derive(Debug)]
-pub(crate) struct GeometryUserData {
+pub(crate) struct UserDataSlot {
     /// Pointer to the user-defined data (`*mut D`), valid while `owner` (if
     /// any) or the borrowed source lives. Read back as `*mut D` after a
     /// `type_id` check.
@@ -53,45 +48,31 @@ pub(crate) struct GeometryUserData {
     pub owner: Option<Box<dyn Any + Send + Sync>>,
 }
 
-// SAFETY: `data` points at a `D: UserGeometryData` (hence `Send + Sync`), owned
+// SAFETY: `data` points at a `D: UserData` (hence `Send + Sync`), owned
 // by `owner` when present or borrowed for at least the geometry's lifetime. The
 // raw pointer carries no extra thread-affinity, so the descriptor is safe to
 // send to / share with other threads.
-unsafe impl Send for GeometryUserData {}
-unsafe impl Sync for GeometryUserData {}
+unsafe impl Send for UserDataSlot {}
+unsafe impl Sync for UserDataSlot {}
 
-/// Payloads for user-defined callbacks of a geometry of kind
-/// [`GeometryKind::USER`].
-#[derive(Debug, Default)]
-pub(crate) struct UserGeometryPayloads {
-    /// Payload for the [`Geometry::set_intersect_function`] call.
-    pub intersect_fn: Option<ErasedFn>,
-    /// Payload for the [`Geometry::set_occluded_function`] call.
-    pub occluded_fn: Option<ErasedFn>,
-    /// Payload for the [`Geometry::set_bounds_function`] call.
-    pub bounds_fn: Option<ErasedFn>,
-}
-
-/// Payloads for subdivision callbacks of a geometry of kind
-/// [`GeometryKind::SUBDIVISION`].
-#[derive(Debug, Default)]
-pub(crate) struct SubdivisionGeometryPayloads {
-    /// Payload for the [`Geometry::set_displacement_function`] call.
-    pub displacement_fn: Option<ErasedFn>,
-}
-
-/// Rust closures bridged to embree, heap-owned via `ErasedFn`. Set rarely; read
-/// by trampolines.
+/// Rust closures bridged to embree for one geometry, heap-owned via
+/// [`ErasedFn`].
+///
+/// A field is `Some` only after its setter has been called; the setters reject
+/// the geometry kinds a callback does not apply to. Set rarely; read by the
+/// trampolines.
 #[derive(Default, Debug)]
 pub(crate) struct GeometryCallbacks {
-    /// Payload for the [`Geometry::set_intersect_filter_function`] call.
-    pub intersect_filter_fn: Option<ErasedFn>,
-    /// Payload for the [`Geometry::set_occluded_filter_function`] call.
-    pub occluded_filter_fn: Option<ErasedFn>,
-    /// Payloads only used for user geometry.
-    pub user_fns: Option<UserGeometryPayloads>,
-    /// Payloads only used for subdivision geometry.
-    pub subdivision_fns: Option<SubdivisionGeometryPayloads>,
+    pub intersect_filter: Option<ErasedFn>,
+    pub occluded_filter: Option<ErasedFn>,
+    /// [`GeometryKind::USER`] only.
+    pub user_intersect: Option<ErasedFn>,
+    /// [`GeometryKind::USER`] only.
+    pub user_occluded: Option<ErasedFn>,
+    /// [`GeometryKind::USER`] only.
+    pub user_bounds: Option<ErasedFn>,
+    /// [`GeometryKind::SUBDIVISION`] only.
+    pub displacement: Option<ErasedFn>,
 }
 
 /// Heap-owned control block that `geometryUserPtr` points at (via
@@ -112,7 +93,7 @@ pub(crate) struct GeometryData {
     /// Rust closures bridged to embree for this geometry.
     pub callbacks: Mutex<GeometryCallbacks>,
     /// The application's user-defined data, if any.
-    pub user_data: Mutex<Option<GeometryUserData>>,
+    pub user_data: Mutex<Option<UserDataSlot>>,
 }
 
 impl Default for GeometryData {
@@ -230,19 +211,7 @@ impl<'buf> Geometry<'buf> {
             Err(device.get_error())
         } else {
             let data = Arc::new(GeometryData {
-                callbacks: Mutex::new(GeometryCallbacks {
-                    user_fns: if kind == GeometryKind::USER {
-                        Some(UserGeometryPayloads::default())
-                    } else {
-                        None
-                    },
-                    subdivision_fns: if kind == GeometryKind::SUBDIVISION {
-                        Some(SubdivisionGeometryPayloads::default())
-                    } else {
-                        None
-                    },
-                    ..Default::default()
-                }),
+                callbacks: Mutex::new(GeometryCallbacks::default()),
                 user_data: Mutex::new(None),
             });
             unsafe {
@@ -698,7 +667,7 @@ impl<'buf> Geometry<'buf> {
     /// enforce this.
     pub fn set_intersect_filter_function<F, D, C>(&mut self, filter: F)
     where
-        D: UserGeometryData,
+        D: UserData,
         C: AsIntersectContext,
         F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
             + Send
@@ -715,7 +684,7 @@ impl<'buf> Geometry<'buf> {
             );
         }
 
-        self.data.callbacks.lock().unwrap().intersect_filter_fn = Some(erased);
+        self.data.callbacks.lock().unwrap().intersect_filter = Some(erased);
     }
 
     /// Unsets the intersection filter function for the geometry.
@@ -723,7 +692,7 @@ impl<'buf> Geometry<'buf> {
         unsafe {
             rtcSetGeometryIntersectFilterFunction(self.handle, None);
         }
-        self.data.callbacks.lock().unwrap().intersect_filter_fn = None;
+        self.data.callbacks.lock().unwrap().intersect_filter = None;
     }
 
     /// Sets the occlusion filter for the geometry.
@@ -756,7 +725,7 @@ impl<'buf> Geometry<'buf> {
     /// enforce this.
     pub fn set_occluded_filter_function<F, D, C>(&mut self, filter: F)
     where
-        D: UserGeometryData,
+        D: UserData,
         C: AsIntersectContext,
         F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
             + Send
@@ -772,7 +741,7 @@ impl<'buf> Geometry<'buf> {
                 occluded_filter_function::<F, D, C>(),
             );
         }
-        self.data.callbacks.lock().unwrap().occluded_filter_fn = Some(erased);
+        self.data.callbacks.lock().unwrap().occluded_filter = Some(erased);
     }
 
     /// Unsets the occlusion filter function for the geometry.
@@ -780,7 +749,7 @@ impl<'buf> Geometry<'buf> {
         unsafe {
             rtcSetGeometryOccludedFilterFunction(self.handle, None);
         }
-        self.data.callbacks.lock().unwrap().occluded_filter_fn = None;
+        self.data.callbacks.lock().unwrap().occluded_filter = None;
     }
 
     // TODO(yang): how to handle the closure? RTCPointQueryFunctionArguments has a
@@ -984,7 +953,7 @@ impl<'buf> Geometry<'buf> {
     ///
     /// # Access from callbacks and thread safety
     ///
-    /// `D` must be [`Send`] + [`Sync`] (see [`UserGeometryData`]). Callbacks
+    /// `D` must be [`Send`] + [`Sync`] (see [`UserData`]). Callbacks
     /// (filter / intersect / occluded / bounds / displacement) receive the data
     /// as a shared `Option<&D>` and may run from several threads
     /// concurrently, so:
@@ -998,9 +967,9 @@ impl<'buf> Geometry<'buf> {
     ///   cannot overlap a traversal) and needs no interior mutability.
     pub fn set_user_data<'a: 'buf, D>(&'buf mut self, user_data: &'a mut D)
     where
-        D: UserGeometryData,
+        D: UserData,
     {
-        *self.data.user_data.lock().unwrap() = Some(GeometryUserData {
+        *self.data.user_data.lock().unwrap() = Some(UserDataSlot {
             data: user_data as *mut D as *mut std::os::raw::c_void,
             type_id: TypeId::of::<D>(),
             owner: None,
@@ -1021,13 +990,13 @@ impl<'buf> Geometry<'buf> {
     /// callback, or [`Geometry::get_user_data_mut`] outside).
     pub fn set_owned_user_data<D>(&mut self, user_data: D)
     where
-        D: UserGeometryData,
+        D: UserData,
     {
         let raw: *mut D = Box::into_raw(Box::new(user_data));
         let owner: Box<dyn Any + Send + Sync> = unsafe { Box::from_raw(raw) };
 
         // Replacing the Option drops any previous owner, freeing old owned data once.
-        *self.data.user_data.lock().unwrap() = Some(GeometryUserData {
+        *self.data.user_data.lock().unwrap() = Some(UserDataSlot {
             data: raw as *mut D as *mut std::os::raw::c_void,
             type_id: TypeId::of::<D>(),
             owner: Some(owner),
@@ -1053,7 +1022,7 @@ impl<'buf> Geometry<'buf> {
     /// threading model.)
     pub fn get_user_data<D>(&self) -> Option<&D>
     where
-        D: UserGeometryData,
+        D: UserData,
     {
         // Validate and copy the pointer out from under the lock, then form a reference
         // tied to `&self` (the user data outlives the geometry's borrow).
@@ -1084,7 +1053,7 @@ impl<'buf> Geometry<'buf> {
     /// for mutating it there).
     pub fn get_user_data_mut<D>(&mut self) -> Option<&mut D>
     where
-        D: UserGeometryData,
+        D: UserData,
     {
         let ptr: *mut D = {
             let user_data = self.data.user_data.lock().unwrap();
@@ -1326,7 +1295,7 @@ impl<'buf> Geometry<'buf> {
     /// enforce this.
     pub fn set_bounds_function<F, D>(&mut self, bounds: F)
     where
-        D: UserGeometryData,
+        D: UserData,
         F: Fn(&mut Bounds, u32, u32, Option<&D>) + Send + Sync + 'static,
     {
         match self.kind {
@@ -1337,14 +1306,7 @@ impl<'buf> Geometry<'buf> {
                     bounds_function::<F, D>(),
                     ptr::null_mut(),
                 );
-                self.data
-                    .callbacks
-                    .lock()
-                    .unwrap()
-                    .user_fns
-                    .as_mut()
-                    .unwrap()
-                    .bounds_fn = Some(erased);
+                self.data.callbacks.lock().unwrap().user_bounds = Some(erased);
             },
             _ => eprintln!(
                 "Only user geometries can have a bounds function! No bounds function set."
@@ -1358,14 +1320,7 @@ impl<'buf> Geometry<'buf> {
         match self.kind {
             GeometryKind::USER => unsafe {
                 rtcSetGeometryBoundsFunction(self.handle, None, ptr::null_mut());
-                self.data
-                    .callbacks
-                    .lock()
-                    .unwrap()
-                    .user_fns
-                    .as_mut()
-                    .unwrap()
-                    .bounds_fn = None;
+                self.data.callbacks.lock().unwrap().user_bounds = None;
             },
             _ => panic!("Only user geometries can have a bounds function!"),
         }
@@ -1460,7 +1415,7 @@ impl<'buf> Geometry<'buf> {
     /// enforce this.
     pub fn set_intersect_function<F, D, C>(&mut self, intersect: F)
     where
-        D: UserGeometryData,
+        D: UserData,
         C: AsIntersectContext,
         F: for<'a> Fn(RayHitN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
             + Send
@@ -1471,14 +1426,7 @@ impl<'buf> Geometry<'buf> {
             GeometryKind::USER => unsafe {
                 let erased = ErasedFn::new(intersect);
                 rtcSetGeometryIntersectFunction(self.handle, intersect_function::<F, D, C>());
-                self.data
-                    .callbacks
-                    .lock()
-                    .unwrap()
-                    .user_fns
-                    .as_mut()
-                    .unwrap()
-                    .intersect_fn = Some(erased);
+                self.data.callbacks.lock().unwrap().user_intersect = Some(erased);
             },
             _ => eprintln!(
                 "Only user geometries can have an intersect function! No intersect function set."
@@ -1491,14 +1439,7 @@ impl<'buf> Geometry<'buf> {
         match self.kind {
             GeometryKind::USER => unsafe {
                 rtcSetGeometryIntersectFunction(self.handle, None);
-                self.data
-                    .callbacks
-                    .lock()
-                    .unwrap()
-                    .user_fns
-                    .as_mut()
-                    .unwrap()
-                    .intersect_fn = None;
+                self.data.callbacks.lock().unwrap().user_intersect = None;
             },
             _ => eprintln!("Only user geometries can have an intersect function!"),
         }
@@ -1538,7 +1479,7 @@ impl<'buf> Geometry<'buf> {
     /// enforce this.
     pub fn set_occluded_function<F, D, C>(&mut self, occluded: F)
     where
-        D: UserGeometryData,
+        D: UserData,
         C: AsIntersectContext,
         F: for<'a> Fn(RayN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
             + Send
@@ -1551,14 +1492,7 @@ impl<'buf> Geometry<'buf> {
                 unsafe {
                     rtcSetGeometryOccludedFunction(self.handle, occluded_function::<F, D, C>())
                 };
-                self.data
-                    .callbacks
-                    .lock()
-                    .unwrap()
-                    .user_fns
-                    .as_mut()
-                    .unwrap()
-                    .occluded_fn = Some(erased);
+                self.data.callbacks.lock().unwrap().user_occluded = Some(erased);
             }
             _ => eprintln!("Only user geometries can have an occluded function!"),
         }
@@ -1569,14 +1503,7 @@ impl<'buf> Geometry<'buf> {
         match self.kind {
             GeometryKind::USER => unsafe {
                 rtcSetGeometryOccludedFunction(self.handle, None);
-                self.data
-                    .callbacks
-                    .lock()
-                    .unwrap()
-                    .user_fns
-                    .as_mut()
-                    .unwrap()
-                    .occluded_fn = None;
+                self.data.callbacks.lock().unwrap().user_occluded = None;
             },
             _ => eprintln!("Only user geometries can have an occluded function!"),
         }
@@ -1747,7 +1674,7 @@ impl<'buf> Geometry<'buf> {
     /// Sync`. The `Fn + Send + Sync` bounds on the closure enforce this.
     pub unsafe fn set_displacement_function<F, D>(&mut self, displacement: F)
     where
-        D: UserGeometryData,
+        D: UserData,
         F: for<'a> Fn(RTCGeometry, Vertices<'a>, u32, u32, Option<&D>) + Send + Sync + 'static,
     {
         match self.kind {
@@ -1756,14 +1683,7 @@ impl<'buf> Geometry<'buf> {
                 unsafe {
                     rtcSetGeometryDisplacementFunction(self.handle, displacement_function::<F, D>())
                 }
-                self.data
-                    .callbacks
-                    .lock()
-                    .unwrap()
-                    .subdivision_fns
-                    .as_mut()
-                    .unwrap()
-                    .displacement_fn = Some(erased);
+                self.data.callbacks.lock().unwrap().displacement = Some(erased);
             }
             _ => eprintln!("Only subdivision geometries can have displacement functions!"),
         }
@@ -1774,14 +1694,7 @@ impl<'buf> Geometry<'buf> {
         match self.kind {
             GeometryKind::SUBDIVISION => unsafe {
                 rtcSetGeometryDisplacementFunction(self.handle, None);
-                self.data
-                    .callbacks
-                    .lock()
-                    .unwrap()
-                    .subdivision_fns
-                    .as_mut()
-                    .unwrap()
-                    .displacement_fn = None;
+                self.data.callbacks.lock().unwrap().displacement = None;
             },
             _ => panic!("Only subdivision geometries can have displacement functions!"),
         }
@@ -2144,13 +2057,13 @@ impl_geometry_type!(Instance, GeometryKind::INSTANCE,
 /// for intersect.
 fn intersect_filter_function<F, D, C>() -> RTCFilterFunctionN
 where
-    D: UserGeometryData,
+    D: UserData,
     C: AsIntersectContext,
     F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>) + Send + Sync + 'static,
 {
     unsafe extern "C" fn inner<F, D, C>(args: *const RTCFilterFunctionNArguments)
     where
-        D: UserGeometryData,
+        D: UserData,
         C: AsIntersectContext,
         F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
             + Send
@@ -2163,7 +2076,7 @@ where
             .callbacks
             .lock()
             .unwrap()
-            .intersect_filter_fn
+            .intersect_filter
             .as_ref()
             .map(|e| e.as_ptr());
 
@@ -2209,13 +2122,13 @@ where
 /// for occluded.
 fn occluded_filter_function<F, D, C>() -> RTCFilterFunctionN
 where
-    D: UserGeometryData,
+    D: UserData,
     C: AsIntersectContext,
     F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>) + Send + Sync + 'static,
 {
     unsafe extern "C" fn inner<F, D, C>(args: *const RTCFilterFunctionNArguments)
     where
-        D: UserGeometryData,
+        D: UserData,
         C: AsIntersectContext,
         F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
             + Send
@@ -2227,7 +2140,7 @@ where
             .callbacks
             .lock()
             .unwrap()
-            .occluded_filter_fn
+            .occluded_filter
             .as_ref()
             .map(|e| e.as_ptr());
         let Some(cb_ptr) = cb_ptr else { return };
@@ -2272,12 +2185,12 @@ where
 /// Helper function to convert a Rust closure to `RTCBoundsFunction` callback.
 fn bounds_function<F, D>() -> RTCBoundsFunction
 where
-    D: UserGeometryData,
+    D: UserData,
     F: Fn(&mut Bounds, u32, u32, Option<&D>) + Send + Sync + 'static,
 {
     unsafe extern "C" fn inner<F, D>(args: *const RTCBoundsFunctionArguments)
     where
-        D: UserGeometryData,
+        D: UserData,
         F: Fn(&mut Bounds, u32, u32, Option<&D>) + Send + Sync + 'static,
     {
         let data = &*((*args).geometryUserPtr as *const GeometryData);
@@ -2285,10 +2198,7 @@ where
             .callbacks
             .lock()
             .unwrap()
-            .user_fns
-            .as_ref()
-            .expect("User payloads not set! Geometry must be GeometryKind::USER")
-            .bounds_fn
+            .user_bounds
             .as_ref()
             .map(|e| e.as_ptr());
         let (user_ptr, user_tid) = match data.user_data.lock().unwrap().as_ref() {
@@ -2315,7 +2225,7 @@ where
     Some(inner::<F, D>)
 }
 
-pub struct IntersectFunctionNArgs<'a, C: AsIntersectContext, D: UserGeometryData> {
+pub struct IntersectFunctionNArgs<'a, C: AsIntersectContext, D: UserData> {
     pub ray_hit_n: RayHitN<'a>,
     pub valid_n: ValidityN<'a>,
     pub context: &'a mut C,
@@ -2325,7 +2235,7 @@ pub struct IntersectFunctionNArgs<'a, C: AsIntersectContext, D: UserGeometryData
     raw_geom_user_ptr: *mut std::os::raw::c_void,
 }
 
-impl<'a, C: AsIntersectContext, D: UserGeometryData> IntersectFunctionNArgs<'a, C, D> {
+impl<'a, C: AsIntersectContext, D: UserData> IntersectFunctionNArgs<'a, C, D> {
     /// Returns the number of rays in the ray packet.
     pub fn len(&self) -> usize { self.ray_hit_n.len() }
 }
@@ -2334,13 +2244,13 @@ impl<'a, C: AsIntersectContext, D: UserGeometryData> IntersectFunctionNArgs<'a, 
 /// callback.
 fn intersect_function<F, D, C>() -> RTCIntersectFunctionN
 where
-    D: UserGeometryData,
+    D: UserData,
     C: AsIntersectContext,
     F: for<'a> Fn(RayHitN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>) + Send + Sync + 'static,
 {
     unsafe extern "C" fn inner<F, D, C>(args: *const RTCIntersectFunctionNArguments)
     where
-        D: UserGeometryData,
+        D: UserData,
         C: AsIntersectContext,
         F: for<'a> Fn(RayHitN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
             + Send
@@ -2352,10 +2262,7 @@ where
             .callbacks
             .lock()
             .unwrap()
-            .user_fns
-            .as_ref()
-            .expect("User payloads not set! Geometry must be GeometryKind::USER")
-            .intersect_fn
+            .user_intersect
             .as_ref()
             .map(|e| e.as_ptr());
         let Some(cb_ptr) = cb_ptr else { return };
@@ -2395,13 +2302,13 @@ where
 /// callback.
 fn occluded_function<F, D, C>() -> RTCOccludedFunctionN
 where
-    D: UserGeometryData,
+    D: UserData,
     C: AsIntersectContext,
     F: for<'a> Fn(RayN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>) + Send + Sync + 'static,
 {
     unsafe extern "C" fn inner<F, D, C>(args: *const RTCOccludedFunctionNArguments)
     where
-        D: UserGeometryData,
+        D: UserData,
         C: AsIntersectContext,
         F: for<'a> Fn(RayN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
             + Send
@@ -2413,10 +2320,7 @@ where
             .callbacks
             .lock()
             .unwrap()
-            .user_fns
-            .as_ref()
-            .expect("User payloads not set! Geometry must be GeometryKind::USER")
-            .occluded_fn
+            .user_occluded
             .as_ref()
             .map(|e| e.as_ptr());
         let Some(cb_ptr) = cb_ptr else { return };
@@ -2526,12 +2430,12 @@ impl<'a> ExactSizeIterator for VerticesIterMut<'a> {
 /// callback.
 fn displacement_function<F, D>() -> RTCDisplacementFunctionN
 where
-    D: UserGeometryData,
+    D: UserData,
     F: for<'a> Fn(RTCGeometry, Vertices<'a>, u32, u32, Option<&D>) + Send + Sync + 'static,
 {
     unsafe extern "C" fn inner<F, D>(args: *const RTCDisplacementFunctionNArguments)
     where
-        D: UserGeometryData,
+        D: UserData,
         F: for<'a> Fn(RTCGeometry, Vertices<'a>, u32, u32, Option<&D>) + Send + Sync + 'static,
     {
         let data = &*((*args).geometryUserPtr as *const GeometryData);
@@ -2539,13 +2443,7 @@ where
             .callbacks
             .lock()
             .unwrap()
-            .subdivision_fns
-            .as_ref()
-            .expect(
-                "User payloads not set! Make sure the geometry was created with kind \
-                 GeometryKind::SUBDIVISION",
-            )
-            .displacement_fn
+            .displacement
             .as_ref()
             .map(|e| e.as_ptr());
         let Some(cb_ptr) = cb_ptr else { return };
@@ -2675,7 +2573,7 @@ impl<'a, 'b> Iterator for ValidityNIterMut<'a, 'b> {
     }
 }
 
-// pub struct FilterFnNArgs<'a, C: AsIntersectContext, D: UserGeometryData> {
+// pub struct FilterFnNArgs<'a, C: AsIntersectContext, D: UserData> {
 //     pub ray_n: RayN<'a>,
 //     pub hit_n: HitN<'a>,
 //     pub valid_n: ValidityN<'a>,
@@ -2684,7 +2582,7 @@ impl<'a, 'b> Iterator for ValidityNIterMut<'a, 'b> {
 //     pub count: usize,
 // }
 //
-// pub struct OccludedFnNArgs<'a, C: AsIntersectContext, D: UserGeometryData> {
+// pub struct OccludedFnNArgs<'a, C: AsIntersectContext, D: UserData> {
 //     pub ray_n: RayN<'a>,
 //     pub valid_n: ValidityN<'a>,
 //     pub context: &'a mut C,
@@ -2700,7 +2598,7 @@ impl<'a, 'b> Iterator for ValidityNIterMut<'a, 'b> {
 // callback /// ([`Geometry::set_intersect_filter_function`]) to invoke the
 // intersection /// filter function registered to the geometry and stored inside
 // the context. pub fn invoke_intersect_filter<'a, C: AsIntersectContext, D:
-// UserGeometryData>(     isect_args: &IntersectFunctionNArgs<'a, C, D>,
+// UserData>(     isect_args: &IntersectFunctionNArgs<'a, C, D>,
 //     filter_args: &FilterFnNArgs<'a, C, D>,
 // ) {
 //     let intersect_arguments = RTCIntersectFunctionNArguments {
@@ -2728,7 +2626,7 @@ impl<'a, 'b> Iterator for ValidityNIterMut<'a, 'b> {
 // /// This function can be used inside the occlusion filter function callback
 // /// ([`Geometry::set_occluded_filter_function`]) to invoke the occlusion
 // filter. pub fn invoke_occluded_filter<'a, C: AsIntersectContext, D:
-// UserGeometryData>(     occluded_args: &OccludedFnNArgs<'a, C, D>,
+// UserData>(     occluded_args: &OccludedFnNArgs<'a, C, D>,
 //     filter_args: &FilterFnNArgs<'a, C, D>,
 // ) {
 // }

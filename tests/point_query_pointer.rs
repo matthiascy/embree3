@@ -1,6 +1,7 @@
 //! Proves Scene::point_query passes a usable pointer to its callback.
 //! `scene.rs` currently hands embree `point_query_user_data.data` while the
-//! trampoline casts userPtr back to `*mut PointQueryUserData` (type confusion).
+//! trampoline casts userPtr back to `*mut PointQueryCallbackData` (type
+//! confusion).
 
 mod common;
 
