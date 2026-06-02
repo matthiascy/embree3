@@ -678,6 +678,17 @@ impl<'buf> Geometry<'buf> {
     /// algorithms that need to extend the ray with additional data must use
     /// the rayID component of the ray to identify the original ray to
     /// access the per-ray data.
+    ///
+    /// # Thread safety
+    ///
+    /// Embree may invoke this callback from multiple threads concurrently — for
+    /// example during a parallel [`Scene::commit`](crate::Scene::commit),
+    /// or when ray queries are issued from several threads on a shared
+    /// scene. The closure must therefore be safe to call from several
+    /// threads at once and to share across them: it must not depend
+    /// on exclusive `&mut` access to its captures, and everything it captures
+    /// must be `Send + Sync`. A future revision will enforce this with `Fn
+    /// + Send + Sync` bounds in place of the current `FnMut`.
     pub fn set_intersect_filter_function<F, D, C>(&mut self, filter: F)
     where
         D: UserGeometryData,
@@ -722,6 +733,17 @@ impl<'buf> Geometry<'buf> {
     /// inside or outside the leaf. Please see the description of the
     /// [`Geometry::set_intersect_filter_function`] for a description of the
     /// filter callback function.
+    ///
+    /// # Thread safety
+    ///
+    /// Embree may invoke this callback from multiple threads concurrently — for
+    /// example during a parallel [`Scene::commit`](crate::Scene::commit),
+    /// or when ray queries are issued from several threads on a shared
+    /// scene. The closure must therefore be safe to call from several
+    /// threads at once and to share across them: it must not depend
+    /// on exclusive `&mut` access to its captures, and everything it captures
+    /// must be `Send + Sync`. A future revision will enforce this with `Fn
+    /// + Send + Sync` bounds in place of the current `FnMut`.
     pub fn set_occluded_filter_function<F, D, C>(&mut self, filter: F)
     where
         D: UserGeometryData,
@@ -1252,6 +1274,17 @@ impl<'buf> Geometry<'buf> {
     /// that pointer from the `geometryUserPtr` field and calculate the
     /// proper bounding box for the requested primitive and time, and store
     /// that bounding box to the destination structure (`bounds_o` member).
+    ///
+    /// # Thread safety
+    ///
+    /// Embree may invoke this callback from multiple threads concurrently — for
+    /// example during a parallel [`Scene::commit`](crate::Scene::commit),
+    /// or when ray queries are issued from several threads on a shared
+    /// scene. The closure must therefore be safe to call from several
+    /// threads at once and to share across them: it must not depend
+    /// on exclusive `&mut` access to its captures, and everything it captures
+    /// must be `Send + Sync`. A future revision will enforce this with `Fn
+    /// + Send + Sync` bounds in place of the current `FnMut`.
     pub fn set_bounds_function<F, D>(&mut self, bounds: F)
     where
         D: UserGeometryData,
@@ -1375,6 +1408,17 @@ impl<'buf> Geometry<'buf> {
     ///   algorithms that need to extend the ray with additional data must use
     ///   the rayID component of the ray to identify the original ray to access
     ///   the per-ray data.
+    ///
+    /// # Thread safety
+    ///
+    /// Embree may invoke this callback from multiple threads concurrently — for
+    /// example during a parallel [`Scene::commit`](crate::Scene::commit),
+    /// or when ray queries are issued from several threads on a shared
+    /// scene. The closure must therefore be safe to call from several
+    /// threads at once and to share across them: it must not depend
+    /// on exclusive `&mut` access to its captures, and everything it captures
+    /// must be `Send + Sync`. A future revision will enforce this with `Fn
+    /// + Send + Sync` bounds in place of the current `FnMut`.
     pub fn set_intersect_function<F, D, C>(&mut self, intersect: F)
     where
         D: UserGeometryData,
@@ -1439,6 +1483,17 @@ impl<'buf> Geometry<'buf> {
     ///   - the primitive ID of the primitive to intersect
     ///   - a mutable reference to the user data of the geometry (if any); the
     ///     user data can be set using [`Geometry::set_user_data`]
+    ///
+    /// # Thread safety
+    ///
+    /// Embree may invoke this callback from multiple threads concurrently — for
+    /// example during a parallel [`Scene::commit`](crate::Scene::commit),
+    /// or when ray queries are issued from several threads on a shared
+    /// scene. The closure must therefore be safe to call from several
+    /// threads at once and to share across them: it must not depend
+    /// on exclusive `&mut` access to its captures, and everything it captures
+    /// must be `Send + Sync`. A future revision will enforce this with `Fn
+    /// + Send + Sync` bounds in place of the current `FnMut`.
     pub fn set_occluded_function<F, D, C>(&mut self, occluded: F)
     where
         D: UserGeometryData,
@@ -1636,6 +1691,16 @@ impl<'buf> Geometry<'buf> {
     ///
     /// The callback function provided to this function contains a raw pointer
     /// to Embree geometry.
+    ///
+    /// # Thread safety
+    ///
+    /// Embree may invoke this callback from multiple threads concurrently
+    /// during a parallel [`Scene::commit`](crate::Scene::commit). The
+    /// closure must therefore be safe to call from several threads at once
+    /// and to share across them: it must not depend on exclusive `&mut`
+    /// access to its captures, and everything it captures must be `Send +
+    /// Sync`. A future revision will enforce this with `Fn + Send + Sync`
+    /// bounds in place of the current `FnMut`.
     pub unsafe fn set_displacement_function<F, D>(&mut self, displacement: F)
     where
         D: UserGeometryData,

@@ -82,6 +82,14 @@ impl Device {
     ///     println!("Error: {:?} {}", error, msg);
     /// });
     /// ```
+    ///
+    /// # Thread safety
+    ///
+    /// The error callback runs synchronously on the thread that reported the
+    /// error, but an embree worker thread during a parallel operation. It is
+    /// not subject to the concurrent-invocation requirement of the geometry
+    /// and memory-monitor callbacks, but its captures should still be
+    /// `Send`.
     pub fn set_error_function<F>(&self, error_fn: F)
     where
         F: FnMut(RTCError, &'static str) + 'static,
@@ -152,6 +160,17 @@ impl Device {
     ///     true
     /// });
     /// ```
+    ///
+    /// # Thread safety
+    ///
+    /// Embree may invoke this callback from multiple threads concurrently (it
+    /// fires around internal allocations, including during a parallel
+    /// [`Scene::commit`](crate::Scene::commit)). The closure must therefore
+    /// be safe to call from several threads at once and to share
+    /// across them: it must not depend on exclusive `&mut` access to its
+    /// captures, and everything it captures must be `Send + Sync`. A future
+    /// revision will enforce this with `Fn + Send + Sync` bounds in place
+    /// of the current `FnMut`.
     pub fn set_memory_monitor_function<F>(&self, monitor_fn: F)
     where
         F: FnMut(isize, bool) -> bool + 'static,

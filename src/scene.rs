@@ -391,6 +391,16 @@ impl<'a> Scene<'a> {
     /// # Warning
     ///
     /// Must be called after the scene has been committed.
+    ///
+    /// # Thread safety
+    ///
+    /// Embree may invoke this callback from multiple threads concurrently
+    /// during a parallel [`Scene::commit`](crate::Scene::commit). The
+    /// closure must therefore be safe to call from several threads at once
+    /// and to share across them: it must not depend on exclusive
+    /// `&mut` access to its captures, and everything it captures must be `Send
+    /// + Sync`. A future revision will enforce this with `Fn + Send + Sync`
+    /// bounds in place of the current `FnMut`.
     pub fn set_progress_monitor_function<F>(&mut self, progress: F)
     where
         F: FnMut(f64) -> bool + 'static,
