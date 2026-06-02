@@ -429,18 +429,7 @@ where
     ) where
         F: FnMut(RTCError, &'static str),
     {
-        let mutex = unsafe { &*(f as *const Mutex<DeviceCallbacks>) };
-        let mut cbs = mutex.lock().unwrap();
-        let Some(cb_ptr) = cbs.error_fn.as_mut().map(|e| e.as_ptr()) else {
-            // This should never happen, as the callback is only invoked by
-            // embree when `error_fn` is `Some`.
-            eprintln!(
-                "[Embree] Callback error function is None. This is a bug in embree-rs. Please \
-                 report this to the developers."
-            );
-            return;
-        };
-        let cb = &mut *(cb_ptr as *mut F);
+        let cb = &mut *(f as *mut F);
         cb(error, std::ffi::CStr::from_ptr(msg).to_str().unwrap())
     }
 
@@ -457,19 +446,7 @@ where
     where
         F: FnMut(isize, bool) -> bool,
     {
-        let mutex = unsafe { &*(f as *const Mutex<DeviceCallbacks>) };
-        let mut cbs = mutex.lock().unwrap();
-        let Some(cb_ptr) = cbs.memory_monitor_fn.as_mut().map(|e| e.as_ptr()) else {
-            // This should never happen, as the callback is only invoked by
-            // embree when `memory_monitor_fn` is `Some`.
-            eprintln!(
-                "[Embree] Callback memory monitor function is None. This is a bug in embree-rs. \
-                 Please report this to the developers."
-            );
-            return true; // Don't cancel the operation, as this is a bug in
-                         // embree-rs, not in the user's code.
-        };
-        let cb = &mut *(cb_ptr as *mut F);
+        let cb = &mut *(f as *mut F);
         cb(bytes, post)
     }
 

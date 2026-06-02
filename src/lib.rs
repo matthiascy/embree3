@@ -293,17 +293,18 @@ pub struct AlignedVector<T> {
 }
 
 impl<T> AlignedVector<T> {
-    pub fn new(len: usize, align: usize) -> Self {
+    pub fn zeroed(len: usize, align: usize) -> Self {
         let t_size = mem::size_of::<T>();
         let t_align = mem::align_of::<T>();
-        let layout = if t_align >= align {
-            alloc::Layout::from_size_align(t_size * len, t_align).unwrap()
-        } else {
-            alloc::Layout::from_size_align(t_size * len, align).unwrap()
-        };
+        let align = t_align.max(align);
+        let layout = alloc::Layout::from_size_align(t_size * len, align).unwrap();
         unsafe {
+            let raw = alloc::alloc_zeroed(layout);
+            if raw.is_null() {
+                alloc::handle_alloc_error(layout);
+            }
             AlignedVector {
-                vec: Vec::from_raw_parts(alloc::alloc(layout) as *mut T, len, len),
+                vec: Vec::from_raw_parts(raw as *mut T, len, len),
                 layout,
             }
         }
@@ -313,7 +314,7 @@ impl<T> AlignedVector<T> {
     where
         T: Copy,
     {
-        let mut v = Self::new(len, align);
+        let mut v = Self::zeroed(len, align);
         for x in v.iter_mut() {
             *x = init;
         }
@@ -354,12 +355,10 @@ fn test_aligned_vector_alloc() {
 }
 
 #[test]
-#[ignore = "known to fail under Miri due to reading uninitialised memory; proof of the bug this \
-            test is designed to catch"]
 fn miri_aligned_vector_new_is_initialised() {
     // `new` claims len elements are initialised over memory from `alloc::alloc`,
     // which is undefined. Under Miri this reads uninitialised memory.
-    let v = AlignedVector::<u32>::new(8, 16);
+    let v = AlignedVector::<u32>::zeroed(8, 16);
     let mut acc = 0u32;
     for x in v.iter() {
         acc = acc.wrapping_add(*x); // reading uninitialised T -> Miri error

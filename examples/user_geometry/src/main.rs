@@ -100,7 +100,7 @@ fn create_analytical_spheres<'a>(
     n: u32,
 ) -> AlignedVector<Sphere> {
     let mut geom = device.create_geometry(GeometryKind::USER).unwrap();
-    let mut spheres = AlignedVector::<Sphere>::new(n as usize, 16);
+    let mut spheres = AlignedVector::<Sphere>::zeroed(n as usize, 16);
     let geom_id = scene.attach_geometry(&geom);
     spheres.iter_mut().for_each(|sphere| {
         sphere.geom_id = geom_id;

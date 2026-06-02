@@ -920,8 +920,7 @@ where
     where
         F: FnMut(f64) -> bool + 'static,
     {
-        let mutex = &*(f as *mut std::sync::Mutex<ErasedFn>);
-        let cb = &mut (*(mutex.lock().unwrap().as_ptr() as *mut F));
+        let cb = &mut *(f as *mut F);
         cb(n)
     }
 
