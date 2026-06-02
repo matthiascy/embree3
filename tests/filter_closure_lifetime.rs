@@ -6,7 +6,6 @@ use std::{cell::RefCell, rc::Rc};
 use embree::IntersectContext;
 
 #[test]
-#[ignore = "known to fail on current code; proof of the bug this test is designed to catch"]
 fn capturing_intersect_filter_is_invoked_with_live_state() {
     let deviec = common::device();
     let mut scene = deviec.create_scene().unwrap();

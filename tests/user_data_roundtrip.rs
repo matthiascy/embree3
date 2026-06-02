@@ -11,7 +11,6 @@ struct UserData {
 }
 
 #[test]
-#[ignore = "known to fail on current code; proof of the bug this test is designed to catch"]
 fn user_data_reaches_bounds_callback_correctly_typed() {
     let device = common::device();
     let mut scene = device.create_scene().unwrap();

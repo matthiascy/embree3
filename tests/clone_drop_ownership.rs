@@ -10,7 +10,6 @@ struct UserData {
 }
 
 #[test]
-#[ignore = "known to fail on current code; proof of the bug this test is designed to catch"]
 fn dropping_one_clone_does_not_free_shared_user_data() {
     let device = common::device();
     let mut scene = device.create_scene().unwrap();
