@@ -218,10 +218,7 @@ impl<'src> BufferSlice<'src> {
                     marker: PhantomData,
                 })
             }
-            BufferSlice::User { .. } => {
-                eprintln!("Creating a view from a user owned/borrowed memory is not allowed!");
-                Err(Error::INVALID_OPERATION)
-            }
+            BufferSlice::User { .. } => Err(Error::INVALID_OPERATION),
         }
     }
 
@@ -247,10 +244,7 @@ impl<'src> BufferSlice<'src> {
                     marker: PhantomData,
                 })
             }
-            BufferSlice::User { .. } => {
-                eprintln!("Creating a view from a user owned/borrowed memory is not allowed!");
-                Err(Error::INVALID_OPERATION)
-            }
+            BufferSlice::User { .. } => Err(Error::INVALID_OPERATION),
         }
     }
 }

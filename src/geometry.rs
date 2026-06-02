@@ -272,10 +272,6 @@ impl<'buf> Geometry<'buf> {
     fn check_vertex_attribute(&self) -> Result<(), Error> {
         match self.kind {
             GeometryKind::GRID | GeometryKind::USER | GeometryKind::INSTANCE => {
-                eprint!(
-                    "Vertex attribute not allowed for geometries of type {:?}!",
-                    self.kind
-                );
                 Err(Error::INVALID_OPERATION)
             }
             _ => Ok(()),
@@ -328,13 +324,6 @@ impl<'buf> Geometry<'buf> {
                 offset,
                 size,
             } => {
-                dbg!(
-                    "Binding buffer slice to slot {}, offset {}, stride {}, count {}",
-                    slot,
-                    offset,
-                    stride,
-                    count
-                );
                 let mut attachments = self.attachments.lock().unwrap();
                 let bindings = attachments.entry(usage).or_insert_with(Vec::new);
                 match bindings.iter().position(|a| a.slot == slot) {
@@ -394,10 +383,7 @@ impl<'buf> Geometry<'buf> {
                     }
                 }
             }
-            BufferSlice::GeometryLocal { .. } => {
-                eprint!("Sharing geometry local buffer is not allowed!");
-                Err(Error::INVALID_ARGUMENT)
-            }
+            BufferSlice::GeometryLocal { .. } => Err(Error::INVALID_ARGUMENT),
             BufferSlice::User {
                 ptr, offset, size, ..
             } => {
@@ -527,7 +513,6 @@ impl<'buf> Geometry<'buf> {
                     Ok(slice)
                 }
             } else {
-                eprint!("Buffer already attached to slot {}", slot);
                 Err(Error::INVALID_ARGUMENT)
             }
         }
@@ -1078,12 +1063,9 @@ impl<'buf> Geometry<'buf> {
                     rtcSetGeometryUserPrimitiveCount(self.handle, count);
                 }
             }
-            _ => {
-                eprint!(
-                    "User primitive count not allowed for geometries of type {:?}!",
-                    self.kind
-                );
-            }
+            // Primitive count is meaningful only for user-defined geometry; a
+            // no-op for every other kind.
+            _ => {}
         }
     }
 
@@ -1101,12 +1083,8 @@ impl<'buf> Geometry<'buf> {
     /// * `count` - The number of vertex attribute slots.
     pub fn set_vertex_attribute_count(&mut self, count: u32) {
         match self.kind {
-            GeometryKind::GRID | GeometryKind::USER | GeometryKind::INSTANCE => {
-                eprint!(
-                    "Vertex attribute not allowed for geometries of type {:?}!",
-                    self.kind
-                );
-            }
+            // Vertex attributes are not supported by these kinds; no-op.
+            GeometryKind::GRID | GeometryKind::USER | GeometryKind::INSTANCE => {}
             _ => {
                 // Update the vertex attribute count.
                 unsafe {
@@ -1308,9 +1286,8 @@ impl<'buf> Geometry<'buf> {
                 );
                 self.data.callbacks.lock().unwrap().user_bounds = Some(erased);
             },
-            _ => eprintln!(
-                "Only user geometries can have a bounds function! No bounds function set."
-            ),
+            // Bounds functions apply only to user geometry; ignored otherwise.
+            _ => {}
         }
     }
 
@@ -1428,9 +1405,8 @@ impl<'buf> Geometry<'buf> {
                 rtcSetGeometryIntersectFunction(self.handle, intersect_function::<F, D, C>());
                 self.data.callbacks.lock().unwrap().user_intersect = Some(erased);
             },
-            _ => eprintln!(
-                "Only user geometries can have an intersect function! No intersect function set."
-            ),
+            // Intersect functions apply only to user geometry; ignored otherwise.
+            _ => {}
         }
     }
 
@@ -1441,7 +1417,8 @@ impl<'buf> Geometry<'buf> {
                 rtcSetGeometryIntersectFunction(self.handle, None);
                 self.data.callbacks.lock().unwrap().user_intersect = None;
             },
-            _ => eprintln!("Only user geometries can have an intersect function!"),
+            // Intersect functions apply only to user geometry; ignored otherwise.
+            _ => {}
         }
     }
 
@@ -1494,7 +1471,8 @@ impl<'buf> Geometry<'buf> {
                 };
                 self.data.callbacks.lock().unwrap().user_occluded = Some(erased);
             }
-            _ => eprintln!("Only user geometries can have an occluded function!"),
+            // Occluded functions apply only to user geometry; ignored otherwise.
+            _ => {}
         }
     }
 
@@ -1505,7 +1483,8 @@ impl<'buf> Geometry<'buf> {
                 rtcSetGeometryOccludedFunction(self.handle, None);
                 self.data.callbacks.lock().unwrap().user_occluded = None;
             },
-            _ => eprintln!("Only user geometries can have an occluded function!"),
+            // Occluded functions apply only to user geometry; ignored otherwise.
+            _ => {}
         }
     }
 
@@ -1685,7 +1664,9 @@ impl<'buf> Geometry<'buf> {
                 }
                 self.data.callbacks.lock().unwrap().displacement = Some(erased);
             }
-            _ => eprintln!("Only subdivision geometries can have displacement functions!"),
+            // Displacement functions apply only to subdivision geometry; ignored
+            // otherwise.
+            _ => {}
         }
     }
 

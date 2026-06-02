@@ -24,6 +24,16 @@ pub fn unit_triangle(device: &Device) -> Geometry<'static> {
     tri
 }
 
+/// Provokes embree into reporting an error through the device's error function.
+/// Binding a vertex buffer to an out-of-range slot makes embree report
+/// `RTC_ERROR_INVALID_ARGUMENT` via the error callback (verified empirically;
+/// it does not abort, unlike e.g. committing a user geometry with no bounds
+/// function). Used by the default-error-reporter tests.
+pub fn trigger_embree_error(device: &Device) {
+    let mut geom = device.create_geometry(GeometryKind::TRIANGLE).unwrap();
+    let _ = geom.set_new_buffer(BufferUsage::VERTEX, 100, Format::FLOAT3, 3 * 4, 3);
+}
+
 /// Casts one ray straight down +z at (0.25, 0.25), which hits `unit_triangle`.
 /// Returns the committed `RayHit` so callers can inspect `hit.geomID` etc.
 pub fn cast_center_ray(scene: &Scene) -> RayHit {

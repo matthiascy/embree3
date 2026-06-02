@@ -48,22 +48,24 @@ unsafe impl Send for Device {}
 unsafe impl Sync for Device {}
 
 impl Device {
-    pub fn new() -> Result<Device, Error> { create_device(None) }
+    pub fn new() -> Result<Device, Error> { create_device(None, true) }
 
     pub fn debug() -> Result<Device, Error> {
         let cfg = CString::new("verbose=4").unwrap();
-        create_device(Some(cfg))
+        create_device(Some(cfg), true)
     }
 
     pub fn with_config(config: Config) -> Result<Device, Error> {
         let cfg = config.to_c_string();
-        create_device(Some(cfg))
+        create_device(Some(cfg), config.report_errors)
     }
 
     /// Register a callback function to be called when an error occurs.
     ///
     /// Only a single callback function can be registered per device,
     /// and further invocations overwrite the previously registered callback.
+    /// In particular this **replaces** the built-in default error reporter that
+    /// the device installs unless [`Config::report_errors`] is `false`.
     ///
     /// The error code is also set if an error callback function is registered.
     ///
@@ -107,6 +109,10 @@ impl Device {
     }
 
     /// Disable the registered error callback function.
+    ///
+    /// This also removes the built-in default error reporter if it is still
+    /// installed, leaving the device with no error callback (errors are then
+    /// only observable via [`Device::get_error`]).
     pub fn unset_error_function(&self) {
         let mut cbs = self.callbacks.lock().unwrap();
         unsafe {
@@ -351,6 +357,19 @@ pub struct Config {
     /// optimizations that may reduce the frequency level below the level
     /// specified.
     pub frequency_level: Option<FrequencyLevel>,
+
+    /// Whether to install the built-in default error reporter on the created
+    /// device. Enabled by default: embree reports many errors asynchronously
+    /// from inside its kernels (during commit/intersect), where there is no
+    /// `Result` to return them through, so without a handler they are silently
+    /// lost. The default reporter is a safety harness for exactly those errors.
+    ///
+    /// It routes through the [`log`](https://docs.rs/log) facade when the `log`
+    /// cargo feature is enabled, and otherwise writes to stderr. Set this to
+    /// `false` to create a device with no default handler, or simply install
+    /// your own with [`Device::set_error_function`] (which replaces the
+    /// default) or remove it with [`Device::unset_error_function`].
+    pub report_errors: bool,
 }
 
 impl Config {
@@ -395,6 +414,7 @@ impl Default for Config {
             enable_selockmemoryprivilege: false,
             verbose: 0,
             frequency_level: None,
+            report_errors: true,
         }
     }
 }
@@ -417,13 +437,23 @@ pub fn enable_ftz_and_daz() {
     }
 }
 
-/// Default error function.
-fn default_error_function(error: Error, msg: &str) {
-    eprintln!("[Embree] {:?} - {}", error, msg);
+/// The built-in default error reporter, installed by the device constructors
+/// unless [`Config::report_errors`] is `false`.
+///
+/// Embree reports many errors asynchronously from inside its kernels (during
+/// commit/intersect), where there is no `Result` to carry them back, so without
+/// a handler they are silently lost. This reporter is the safety harness for
+/// exactly those errors. It routes through the [`log`](https://docs.rs/log) facade when the
+/// `log` cargo feature is enabled, and otherwise writes to stderr.
+fn default_error_reporter(error: RTCError, msg: &str) {
+    #[cfg(feature = "log")]
+    log::error!("embree: {:?} — {}", error, msg);
+    #[cfg(not(feature = "log"))]
+    eprintln!("[embree] {:?} — {}", error, msg);
 }
 
 /// Helper function to create a new Embree device.
-fn create_device(config: Option<CString>) -> Result<Device, Error> {
+fn create_device(config: Option<CString>, report_errors: bool) -> Result<Device, Error> {
     enable_ftz_and_daz();
     let config = config.unwrap_or_else(|| Config::default().to_c_string());
     let handle = unsafe { rtcNewDevice(config.as_ptr()) };
@@ -434,7 +464,14 @@ fn create_device(config: Option<CString>) -> Result<Device, Error> {
             handle,
             callbacks: Arc::new(Mutex::new(DeviceCallbacks::default())),
         };
-        device.set_error_function(default_error_function);
+        // Install the default safety-harness error reporter unless opted out. Embree
+        // also stores the last error code regardless, retrievable via
+        // [`Device::get_error`]; callers wanting custom reporting replace the default
+        // with [`Device::set_error_function`] or remove it with
+        // [`Device::unset_error_function`].
+        if report_errors {
+            device.set_error_function(default_error_reporter);
+        }
         Ok(device)
     }
 }

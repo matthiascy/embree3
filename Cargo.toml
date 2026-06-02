@@ -21,6 +21,15 @@ exclude = [
 	"examples/*"
 ]
 
+[dependencies]
+# Optional: when enabled, the default error reporter routes embree's asynchronous
+# errors through the `log` facade instead of the stderr fallback. Off by default so
+# the crate stays dependency-free unless the application opts in.
+log = { version = "0.4", optional = true }
+
+[features]
+log = ["dep:log"]
+
 [workspace]
 members = [
 	"examples/*",
