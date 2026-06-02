@@ -205,22 +205,31 @@ impl Device {
         cbs.memory_monitor_fn = None;
     }
 
-    /// Query properties of the device.
+    /// Query a property of the device (ISA support flags, version numbers,
+    /// ...).
     ///
     /// # Arguments
     ///
-    /// * `prop` - The property to query. See `RTCDeviceProp` for possible
-    ///   values.
+    /// * `prop` - The property to query. See [`DeviceProperty`] for the
+    ///   possible values.
     ///
     /// # Returns
     ///
-    /// An integer of type `isize`.
+    /// The property value as an `isize`. Many properties are booleans where `0`
+    /// means *false* / *not supported* (e.g.
+    /// [`DeviceProperty::RAY_MASK_SUPPORTED`]). A `0` is a legitimate value,
+    /// not an error. `rtcGetDeviceProperty` does not signal failure through
+    /// its return value; per the embree contract we clear the per-thread
+    /// error, perform the query, then surface any error the query itself
+    /// raised (only possible for an invalid property, which the
+    /// [`DeviceProperty`] enum already rules out).
     pub fn get_property(&self, prop: DeviceProperty) -> Result<isize, Error> {
-        let ret = unsafe { rtcGetDeviceProperty(self.handle, prop) };
-        if ret == 0 {
-            Err(self.get_error())
-        } else {
-            Ok(ret)
+        // Clear any stale per-thread error so we attribute only this call's error.
+        let _ = self.get_error();
+        let value = unsafe { rtcGetDeviceProperty(self.handle, prop) };
+        match self.get_error() {
+            Error::NONE => Ok(value),
+            error => Err(error),
         }
     }
 
