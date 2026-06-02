@@ -1,17 +1,25 @@
 use crate::{
-    sys::*, Buffer, BufferSize, Bvh, DeviceProperty, Error, Geometry, GeometryKind, Scene,
-    SceneFlags,
+    callback::ErasedFn, sys::*, Buffer, BufferSize, Bvh, DeviceProperty, Error, Geometry,
+    GeometryKind, Scene, SceneFlags,
 };
 use std::{
     ffi::CString,
     fmt::{self, Display, Formatter},
     ptr,
+    sync::{Arc, Mutex},
 };
 
 /// Handle to an Embree device.
 #[derive(Debug)]
 pub struct Device {
     pub(crate) handle: RTCDevice,
+    callbacks: Arc<Mutex<DeviceCallbacks>>,
+}
+
+#[derive(Debug, Default)]
+struct DeviceCallbacks {
+    error_fn: Option<ErasedFn>,
+    memory_monitor_fn: Option<ErasedFn>,
 }
 
 impl Clone for Device {
@@ -19,6 +27,7 @@ impl Clone for Device {
         unsafe { rtcRetainDevice(self.handle) }
         Self {
             handle: self.handle,
+            callbacks: self.callbacks.clone(),
         }
     }
 }
@@ -75,23 +84,23 @@ impl Device {
     /// ```
     pub fn set_error_function<F>(&self, error_fn: F)
     where
-        F: FnMut(RTCError, &'static str),
+        F: FnMut(RTCError, &'static str) + 'static,
     {
-        let mut closure = error_fn;
+        let mut cbs = self.callbacks.lock().unwrap();
+        let erased = ErasedFn::new(error_fn);
         unsafe {
-            rtcSetDeviceErrorFunction(
-                self.handle,
-                error_function(&mut closure),
-                &mut closure as *mut _ as *mut ::std::os::raw::c_void,
-            );
+            rtcSetDeviceErrorFunction(self.handle, error_function::<F>(), erased.as_ptr());
         }
+        cbs.error_fn = Some(erased);
     }
 
     /// Disable the registered error callback function.
     pub fn unset_error_function(&self) {
+        let mut cbs = self.callbacks.lock().unwrap();
         unsafe {
             rtcSetDeviceErrorFunction(self.handle, None, ptr::null_mut());
         }
+        cbs.error_fn = None;
     }
 
     /// Register a callback function to track memory consumption of the device.
@@ -145,23 +154,27 @@ impl Device {
     /// ```
     pub fn set_memory_monitor_function<F>(&self, monitor_fn: F)
     where
-        F: FnMut(isize, bool) -> bool,
+        F: FnMut(isize, bool) -> bool + 'static,
     {
-        let mut closure = monitor_fn;
+        let mut cbs = self.callbacks.lock().unwrap();
+        let erased = ErasedFn::new(monitor_fn);
         unsafe {
             rtcSetDeviceMemoryMonitorFunction(
                 self.handle,
-                memory_monitor_function(&mut closure),
-                &mut closure as *mut _ as *mut ::std::os::raw::c_void,
+                memory_monitor_function::<F>(),
+                erased.as_ptr(),
             );
         }
+        cbs.memory_monitor_fn = Some(erased);
     }
 
     /// Disable the registered memory monitor callback function.
     pub fn unset_memory_monitor_function(&self) {
+        let mut cbs = self.callbacks.lock().unwrap();
         unsafe {
             rtcSetDeviceMemoryMonitorFunction(self.handle, None, ptr::null_mut());
         }
+        cbs.memory_monitor_fn = None;
     }
 
     /// Query properties of the device.
@@ -395,16 +408,19 @@ fn create_device(config: Option<CString>) -> Result<Device, Error> {
     if handle.is_null() {
         Err(unsafe { rtcGetDeviceError(ptr::null_mut()) })
     } else {
-        let device = Device { handle };
+        let device = Device {
+            handle,
+            callbacks: Arc::new(Mutex::new(DeviceCallbacks::default())),
+        };
         device.set_error_function(default_error_function);
         Ok(device)
     }
 }
 
 /// Helper function to convert a Rust closure to `RTCErrorFunction` callback.
-fn error_function<F>(_f: &mut F) -> RTCErrorFunction
+fn error_function<F>() -> RTCErrorFunction
 where
-    F: FnMut(RTCError, &'static str),
+    F: FnMut(RTCError, &'static str) + 'static,
 {
     unsafe extern "C" fn inner<F>(
         f: *mut std::os::raw::c_void,
@@ -413,7 +429,18 @@ where
     ) where
         F: FnMut(RTCError, &'static str),
     {
-        let cb = &mut *(f as *mut F);
+        let mutex = unsafe { &*(f as *const Mutex<DeviceCallbacks>) };
+        let mut cbs = mutex.lock().unwrap();
+        let Some(cb_ptr) = cbs.error_fn.as_mut().map(|e| e.as_ptr()) else {
+            // This should never happen, as the callback is only invoked by
+            // embree when `error_fn` is `Some`.
+            eprintln!(
+                "[Embree] Callback error function is None. This is a bug in embree-rs. Please \
+                 report this to the developers."
+            );
+            return;
+        };
+        let cb = &mut *(cb_ptr as *mut F);
         cb(error, std::ffi::CStr::from_ptr(msg).to_str().unwrap())
     }
 
@@ -422,15 +449,27 @@ where
 
 /// Helper function to convert a Rust closure to `RTCMemoryMonitorFunction`
 /// callback.
-fn memory_monitor_function<F>(_f: &mut F) -> RTCMemoryMonitorFunction
+fn memory_monitor_function<F>() -> RTCMemoryMonitorFunction
 where
-    F: FnMut(isize, bool) -> bool,
+    F: FnMut(isize, bool) -> bool + 'static,
 {
     unsafe extern "C" fn inner<F>(f: *mut std::os::raw::c_void, bytes: isize, post: bool) -> bool
     where
         F: FnMut(isize, bool) -> bool,
     {
-        let cb = &mut *(f as *mut F);
+        let mutex = unsafe { &*(f as *const Mutex<DeviceCallbacks>) };
+        let mut cbs = mutex.lock().unwrap();
+        let Some(cb_ptr) = cbs.memory_monitor_fn.as_mut().map(|e| e.as_ptr()) else {
+            // This should never happen, as the callback is only invoked by
+            // embree when `memory_monitor_fn` is `Some`.
+            eprintln!(
+                "[Embree] Callback memory monitor function is None. This is a bug in embree-rs. \
+                 Please report this to the developers."
+            );
+            return true; // Don't cancel the operation, as this is a bug in
+                         // embree-rs, not in the user's code.
+        };
+        let cb = &mut *(cb_ptr as *mut F);
         cb(bytes, post)
     }
 
