@@ -1,6 +1,7 @@
 //! `get_user_data` / `get_user_data_mut` round-trip after the user-data pointer
-//! unification. These read through the locked `GeometryData` (not the raw embree
-//! pointer), so this also guards against the type-confusion regression (SB-2).
+//! unification. These read through the locked `GeometryData` (not the raw
+//! embree pointer), so this also guards against the type-confusion regression
+//! (SB-2).
 
 mod common;
 
@@ -22,7 +23,10 @@ fn get_user_data_roundtrips_and_is_type_checked() {
     geom.set_owned_user_data(UserData { magic: 0xCAFE });
 
     // Shared read returns the value, correctly typed.
-    assert_eq!(geom.get_user_data::<UserData>().map(|u| u.magic), Some(0xCAFE));
+    assert_eq!(
+        geom.get_user_data::<UserData>().map(|u| u.magic),
+        Some(0xCAFE)
+    );
 
     // A mismatched type yields None (type_id check), never a misread.
     assert!(geom.get_user_data::<u64>().is_none());
@@ -31,5 +35,8 @@ fn get_user_data_roundtrips_and_is_type_checked() {
     if let Some(u) = geom.get_user_data_mut::<UserData>() {
         u.magic = 0xBEEF;
     }
-    assert_eq!(geom.get_user_data::<UserData>().map(|u| u.magic), Some(0xBEEF));
+    assert_eq!(
+        geom.get_user_data::<UserData>().map(|u| u.magic),
+        Some(0xBEEF)
+    );
 }

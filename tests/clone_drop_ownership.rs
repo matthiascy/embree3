@@ -3,7 +3,7 @@
 mod common;
 
 use embree::{Bounds, GeometryKind};
-use std::{cell::RefCell, rc::Rc};
+use std::sync::{Arc, Mutex};
 
 struct UserData {
     magic: u32,
@@ -14,7 +14,7 @@ fn dropping_one_clone_does_not_free_shared_user_data() {
     let device = common::device();
     let mut scene = device.create_scene().unwrap();
 
-    let seen: Rc<RefCell<Option<u32>>> = Rc::new(RefCell::new(None));
+    let seen: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
     let seen_in_cb = seen.clone();
 
     let mut geom = device.create_geometry(GeometryKind::USER).unwrap();
@@ -31,7 +31,7 @@ fn dropping_one_clone_does_not_free_shared_user_data() {
             upper_z: 1.0,
             align1: 0.0,
         };
-        *seen_in_cb.borrow_mut() = user.map(|u| u.magic);
+        *seen_in_cb.lock().unwrap() = user.map(|u| u.magic);
     });
     geom.commit();
 
@@ -44,7 +44,7 @@ fn dropping_one_clone_does_not_free_shared_user_data() {
     scene.commit(); // survivor's bounds callback reads the owned user data.
 
     assert_eq!(
-        *seen.borrow(),
+        *seen.lock().unwrap(),
         Some(0x0BAD_F00D),
         "bounds callback must receive the owned user data, correctly typed, even if a clone was \
          dropped"

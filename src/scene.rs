@@ -46,6 +46,13 @@ impl<'a> Drop for Scene<'a> {
     }
 }
 
+// SAFETY: `Scene` is a handle to a refcounted embree object that embree permits
+// to be traversed from multiple threads concurrently after commit. Its interior
+// state — the progress closure (`Send + Sync`, see `ErasedFn`) and the attached
+// geometries (whose callbacks/user data are now `Send + Sync`) — is safe to
+// share. Bound host buffers must, per the caller's contract, outlive the scene
+// and be safe to read concurrently during traversal. Mutation goes through
+// `&mut self`.
 unsafe impl<'a> Sync for Scene<'a> {}
 unsafe impl<'a> Send for Scene<'a> {}
 
@@ -399,11 +406,10 @@ impl<'a> Scene<'a> {
     /// closure must therefore be safe to call from several threads at once
     /// and to share across them: it must not depend on exclusive
     /// `&mut` access to its captures, and everything it captures must be `Send
-    /// + Sync`. A future revision will enforce this with `Fn + Send + Sync`
-    /// bounds in place of the current `FnMut`.
+    /// + Sync`. The `Fn + Send + Sync` bounds on the closure enforce this.
     pub fn set_progress_monitor_function<F>(&mut self, progress: F)
     where
-        F: FnMut(f64) -> bool + 'static,
+        F: Fn(f64) -> bool + Send + Sync + 'static,
     {
         let mut progress_fn = self.progress_monitor_fn.lock().unwrap();
         let erased = ErasedFn::new(progress);
@@ -924,13 +930,13 @@ impl Default for PointQueryUserData {
 /// callback.
 fn progress_monitor_function<F>() -> RTCProgressMonitorFunction
 where
-    F: FnMut(f64) -> bool + 'static,
+    F: Fn(f64) -> bool + Send + Sync + 'static,
 {
     unsafe extern "C" fn inner<F>(f: *mut std::os::raw::c_void, n: f64) -> bool
     where
-        F: FnMut(f64) -> bool + 'static,
+        F: Fn(f64) -> bool + Send + Sync + 'static,
     {
-        let cb = &mut *(f as *mut F);
+        let cb = &*(f as *const F);
         cb(n)
     }
 

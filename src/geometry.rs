@@ -8,9 +8,9 @@ use std::{
 };
 
 use crate::{
-    callback::ErasedFn, geometry, sys::*, AsIntersectContext, Bounds, BufferSlice, BufferUsage,
-    BuildQuality, Device, Error, Format, GeometryKind, HitN, QuaternionDecomposition, RayHitN,
-    RayN, Scene, SubdivisionMode,
+    callback::ErasedFn, sys::*, AsIntersectContext, Bounds, BufferSlice, BufferUsage, BuildQuality,
+    Device, Error, Format, GeometryKind, HitN, QuaternionDecomposition, RayHitN, RayN, Scene,
+    SubdivisionMode,
 };
 
 use std::{
@@ -50,8 +50,15 @@ pub(crate) struct GeometryUserData {
     pub type_id: TypeId,
     /// `Some` when the geometry owns the data; dropping this frees it exactly
     /// once
-    pub owner: Option<Box<dyn Any>>,
+    pub owner: Option<Box<dyn Any + Send + Sync>>,
 }
+
+// SAFETY: `data` points at a `D: UserGeometryData` (hence `Send + Sync`), owned
+// by `owner` when present or borrowed for at least the geometry's lifetime. The
+// raw pointer carries no extra thread-affinity, so the descriptor is safe to
+// send to / share with other threads.
+unsafe impl Send for GeometryUserData {}
+unsafe impl Sync for GeometryUserData {}
 
 /// Payloads for user-defined callbacks of a geometry of kind
 /// [`GeometryKind::USER`].
@@ -687,13 +694,16 @@ impl<'buf> Geometry<'buf> {
     /// scene. The closure must therefore be safe to call from several
     /// threads at once and to share across them: it must not depend
     /// on exclusive `&mut` access to its captures, and everything it captures
-    /// must be `Send + Sync`. A future revision will enforce this with `Fn
-    /// + Send + Sync` bounds in place of the current `FnMut`.
+    /// must be `Send + Sync`. The `Fn + Send + Sync` bounds on the closure
+    /// enforce this.
     pub fn set_intersect_filter_function<F, D, C>(&mut self, filter: F)
     where
         D: UserGeometryData,
         C: AsIntersectContext,
-        F: for<'a> FnMut(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&mut D>) + 'static,
+        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
+            + Send
+            + Sync
+            + 'static,
     {
         let erased = ErasedFn::new(filter);
         // Register the trampoline first, then store the owner (so the old one, if any,
@@ -742,13 +752,16 @@ impl<'buf> Geometry<'buf> {
     /// scene. The closure must therefore be safe to call from several
     /// threads at once and to share across them: it must not depend
     /// on exclusive `&mut` access to its captures, and everything it captures
-    /// must be `Send + Sync`. A future revision will enforce this with `Fn
-    /// + Send + Sync` bounds in place of the current `FnMut`.
+    /// must be `Send + Sync`. The `Fn + Send + Sync` bounds on the closure
+    /// enforce this.
     pub fn set_occluded_filter_function<F, D, C>(&mut self, filter: F)
     where
         D: UserGeometryData,
         C: AsIntersectContext,
-        F: for<'a> FnMut(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&mut D>) + 'static,
+        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
+            + Send
+            + Sync
+            + 'static,
     {
         let erased = ErasedFn::new(filter);
         // Register the trampoline first, then store the owner (so the old one, if any)
@@ -968,6 +981,21 @@ impl<'buf> Geometry<'buf> {
     /// avoid dangling pointers, the user can use `set_owned_user_data` to let
     /// the geometry own the user data, which will be automatically dropped when
     /// the geometry is destroyed.
+    ///
+    /// # Access from callbacks and thread safety
+    ///
+    /// `D` must be [`Send`] + [`Sync`] (see [`UserGeometryData`]). Callbacks
+    /// (filter / intersect / occluded / bounds / displacement) receive the data
+    /// as a shared `Option<&D>` and may run from several threads
+    /// concurrently, so:
+    ///
+    /// - **Read** it freely inside callbacks.
+    /// - To **mutate it from inside a callback**, use `Sync` interior
+    ///   mutability (`Mutex`, `RwLock`, atomics) *within* `D`; a
+    ///   `Cell`/`RefCell` field would make `D: !Sync` and fail to compile.
+    /// - To **mutate it from outside callbacks**, use
+    ///   [`Geometry::get_user_data_mut`], which is gated by `&mut self` (so it
+    ///   cannot overlap a traversal) and needs no interior mutability.
     pub fn set_user_data<'a: 'buf, D>(&'buf mut self, user_data: &'a mut D)
     where
         D: UserGeometryData,
@@ -981,15 +1009,22 @@ impl<'buf> Geometry<'buf> {
 
     /// Sets the user-defined data of the geometry and let the geometry own it.
     ///
-    /// The user data pointer is intended to be pointing to the application's
-    /// representation of the geometry, and is passed to various callback
-    /// functions.
+    /// The user data is the application's representation of the geometry and is
+    /// passed to the various callback functions. Unlike
+    /// [`Geometry::set_user_data`], the geometry owns `user_data`: there is
+    /// no dangling-pointer risk, and it is dropped when the last
+    /// clone of the geometry is dropped.
+    ///
+    /// The same callback-access and thread-safety contract as
+    /// [`Geometry::set_user_data`] applies (`D: Send + Sync`; callbacks
+    /// receive a shared `&D`; mutate via interior mutability inside a
+    /// callback, or [`Geometry::get_user_data_mut`] outside).
     pub fn set_owned_user_data<D>(&mut self, user_data: D)
     where
         D: UserGeometryData,
     {
         let raw: *mut D = Box::into_raw(Box::new(user_data));
-        let owner: Box<dyn Any> = unsafe { Box::from_raw(raw) };
+        let owner: Box<dyn Any + Send + Sync> = unsafe { Box::from_raw(raw) };
 
         // Replacing the Option drops any previous owner, freeing old owned data once.
         *self.data.user_data.lock().unwrap() = Some(GeometryUserData {
@@ -1043,6 +1078,10 @@ impl<'buf> Geometry<'buf> {
     /// Requires `&mut self`, so the borrow checker forbids aliasing references
     /// through this handle. The same cross-callback / cross-[`Clone`]
     /// aliasing contract as [`Geometry::get_user_data`] applies.
+    ///
+    /// This is the way to mutate user data **outside** of callbacks; inside a
+    /// callback the data is shared as `&D` (see [`Geometry::set_user_data`]
+    /// for mutating it there).
     pub fn get_user_data_mut<D>(&mut self) -> Option<&mut D>
     where
         D: UserGeometryData,
@@ -1259,7 +1298,7 @@ impl<'buf> Geometry<'buf> {
     ///
     /// The arguments of the callback closure are:
     ///
-    /// - a mutable reference to the user data of the geometry
+    /// - a shared reference to the user data of the geometry
     ///
     /// - the ID of the primitive to calculate the bounds for
     ///
@@ -1283,12 +1322,12 @@ impl<'buf> Geometry<'buf> {
     /// scene. The closure must therefore be safe to call from several
     /// threads at once and to share across them: it must not depend
     /// on exclusive `&mut` access to its captures, and everything it captures
-    /// must be `Send + Sync`. A future revision will enforce this with `Fn
-    /// + Send + Sync` bounds in place of the current `FnMut`.
+    /// must be `Send + Sync`. The `Fn + Send + Sync` bounds on the closure
+    /// enforce this.
     pub fn set_bounds_function<F, D>(&mut self, bounds: F)
     where
         D: UserGeometryData,
-        F: FnMut(&mut Bounds, u32, u32, Option<&mut D>) + 'static,
+        F: Fn(&mut Bounds, u32, u32, Option<&D>) + Send + Sync + 'static,
     {
         match self.kind {
             GeometryKind::USER => unsafe {
@@ -1370,7 +1409,7 @@ impl<'buf> Geometry<'buf> {
     ///       [`IntersectContextExt`](`crate::IntersectContextExt`))
     ///     - the geometry ID of the geometry to intersect
     ///     - the primitive ID of the primitive to intersect
-    ///     - a mutable reference to the user data of the geometry (if any); the
+    ///     - a shared reference to the user data of the geometry (if any); the
     ///       user data can be set using [`Geometry::set_user_data`]
     ///
     /// The ray component of the ray hit structure contains valid data, in
@@ -1417,13 +1456,16 @@ impl<'buf> Geometry<'buf> {
     /// scene. The closure must therefore be safe to call from several
     /// threads at once and to share across them: it must not depend
     /// on exclusive `&mut` access to its captures, and everything it captures
-    /// must be `Send + Sync`. A future revision will enforce this with `Fn
-    /// + Send + Sync` bounds in place of the current `FnMut`.
+    /// must be `Send + Sync`. The `Fn + Send + Sync` bounds on the closure
+    /// enforce this.
     pub fn set_intersect_function<F, D, C>(&mut self, intersect: F)
     where
         D: UserGeometryData,
         C: AsIntersectContext,
-        F: for<'a> FnMut(RayHitN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&mut D>) + 'static,
+        F: for<'a> Fn(RayHitN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
+            + Send
+            + Sync
+            + 'static,
     {
         match self.kind {
             GeometryKind::USER => unsafe {
@@ -1481,7 +1523,7 @@ impl<'buf> Geometry<'buf> {
     ///     [`IntersectContextExt`](`crate::IntersectContextExt`))
     ///   - the geometry ID of the geometry to intersect
     ///   - the primitive ID of the primitive to intersect
-    ///   - a mutable reference to the user data of the geometry (if any); the
+    ///   - a shared reference to the user data of the geometry (if any); the
     ///     user data can be set using [`Geometry::set_user_data`]
     ///
     /// # Thread safety
@@ -1492,13 +1534,16 @@ impl<'buf> Geometry<'buf> {
     /// scene. The closure must therefore be safe to call from several
     /// threads at once and to share across them: it must not depend
     /// on exclusive `&mut` access to its captures, and everything it captures
-    /// must be `Send + Sync`. A future revision will enforce this with `Fn
-    /// + Send + Sync` bounds in place of the current `FnMut`.
+    /// must be `Send + Sync`. The `Fn + Send + Sync` bounds on the closure
+    /// enforce this.
     pub fn set_occluded_function<F, D, C>(&mut self, occluded: F)
     where
         D: UserGeometryData,
         C: AsIntersectContext,
-        F: for<'a> FnMut(RayN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&mut D>) + 'static,
+        F: for<'a> Fn(RayN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
+            + Send
+            + Sync
+            + 'static,
     {
         match self.kind {
             GeometryKind::USER => {
@@ -1699,12 +1744,11 @@ impl<'buf> Geometry<'buf> {
     /// closure must therefore be safe to call from several threads at once
     /// and to share across them: it must not depend on exclusive `&mut`
     /// access to its captures, and everything it captures must be `Send +
-    /// Sync`. A future revision will enforce this with `Fn + Send + Sync`
-    /// bounds in place of the current `FnMut`.
+    /// Sync`. The `Fn + Send + Sync` bounds on the closure enforce this.
     pub unsafe fn set_displacement_function<F, D>(&mut self, displacement: F)
     where
         D: UserGeometryData,
-        F: for<'a> FnMut(RTCGeometry, Vertices<'a>, u32, u32, Option<&mut D>) + 'static,
+        F: for<'a> Fn(RTCGeometry, Vertices<'a>, u32, u32, Option<&D>) + Send + Sync + 'static,
     {
         match self.kind {
             GeometryKind::SUBDIVISION => {
@@ -2102,13 +2146,16 @@ fn intersect_filter_function<F, D, C>() -> RTCFilterFunctionN
 where
     D: UserGeometryData,
     C: AsIntersectContext,
-    F: for<'a> FnMut(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&mut D>) + 'static,
+    F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>) + Send + Sync + 'static,
 {
     unsafe extern "C" fn inner<F, D, C>(args: *const RTCFilterFunctionNArguments)
     where
         D: UserGeometryData,
         C: AsIntersectContext,
-        F: for<'a> FnMut(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&mut D>) + 'static,
+        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
+            + Send
+            + Sync
+            + 'static,
     {
         let data = &*((*args).geometryUserPtr as *const GeometryData);
 
@@ -2127,11 +2174,11 @@ where
             None => (std::ptr::null_mut(), TypeId::of::<()>()),
         };
 
-        let cb = &mut *(cb_ptr as *mut F);
+        let cb = &*(cb_ptr as *const F);
         let user_data = if user_ptr.is_null() || user_tid != TypeId::of::<D>() {
             None
         } else {
-            Some(&mut *(user_ptr as *mut D))
+            Some(&*(user_ptr as *const D))
         };
 
         let len = (*args).N as usize;
@@ -2164,13 +2211,16 @@ fn occluded_filter_function<F, D, C>() -> RTCFilterFunctionN
 where
     D: UserGeometryData,
     C: AsIntersectContext,
-    F: for<'a> FnMut(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&mut D>) + 'static,
+    F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>) + Send + Sync + 'static,
 {
     unsafe extern "C" fn inner<F, D, C>(args: *const RTCFilterFunctionNArguments)
     where
         D: UserGeometryData,
         C: AsIntersectContext,
-        F: for<'a> FnMut(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&mut D>) + 'static,
+        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
+            + Send
+            + Sync
+            + 'static,
     {
         let data = &*((*args).geometryUserPtr as *const GeometryData);
         let cb_ptr = data
@@ -2187,11 +2237,11 @@ where
             None => (std::ptr::null_mut(), TypeId::of::<()>()),
         };
 
-        let cb = &mut *(cb_ptr as *mut F);
+        let cb = &*(cb_ptr as *const F);
         let user_data = if user_ptr.is_null() || user_tid != TypeId::of::<D>() {
             None
         } else {
-            Some(&mut *(user_ptr as *mut D))
+            Some(&*(user_ptr as *const D))
         };
 
         let len = (*args).N as usize;
@@ -2223,12 +2273,12 @@ where
 fn bounds_function<F, D>() -> RTCBoundsFunction
 where
     D: UserGeometryData,
-    F: FnMut(&mut Bounds, u32, u32, Option<&mut D>) + 'static,
+    F: Fn(&mut Bounds, u32, u32, Option<&D>) + Send + Sync + 'static,
 {
     unsafe extern "C" fn inner<F, D>(args: *const RTCBoundsFunctionArguments)
     where
         D: UserGeometryData,
-        F: FnMut(&mut Bounds, u32, u32, Option<&mut D>) + 'static,
+        F: Fn(&mut Bounds, u32, u32, Option<&D>) + Send + Sync + 'static,
     {
         let data = &*((*args).geometryUserPtr as *const GeometryData);
         let cb_ptr = data
@@ -2247,11 +2297,11 @@ where
         };
 
         let Some(cb_ptr) = cb_ptr else { return };
-        let cb = &mut *(cb_ptr as *mut F);
+        let cb = &*(cb_ptr as *const F);
         let user_data = if user_ptr.is_null() || user_tid != TypeId::of::<D>() {
             None
         } else {
-            Some(&mut *(user_ptr as *mut D))
+            Some(&*(user_ptr as *const D))
         };
 
         cb(
@@ -2286,13 +2336,16 @@ fn intersect_function<F, D, C>() -> RTCIntersectFunctionN
 where
     D: UserGeometryData,
     C: AsIntersectContext,
-    F: for<'a> FnMut(RayHitN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&mut D>),
+    F: for<'a> Fn(RayHitN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>) + Send + Sync + 'static,
 {
     unsafe extern "C" fn inner<F, D, C>(args: *const RTCIntersectFunctionNArguments)
     where
         D: UserGeometryData,
         C: AsIntersectContext,
-        F: for<'a> FnMut(RayHitN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&mut D>),
+        F: for<'a> Fn(RayHitN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
+            + Send
+            + Sync
+            + 'static,
     {
         let data = &*((*args).geometryUserPtr as *const GeometryData);
         let cb_ptr = data
@@ -2310,11 +2363,11 @@ where
             Some(u) => (u.data, u.type_id),
             None => (std::ptr::null_mut(), TypeId::of::<()>()),
         };
-        let cb = &mut *(cb_ptr as *mut F);
+        let cb = &*(cb_ptr as *const F);
         let user_data = if user_ptr.is_null() || user_tid != TypeId::of::<D>() {
             None
         } else {
-            Some(&mut *(user_ptr as *mut D))
+            Some(&*(user_ptr as *const D))
         };
         let len = (*args).N as usize;
         cb(
@@ -2344,13 +2397,16 @@ fn occluded_function<F, D, C>() -> RTCOccludedFunctionN
 where
     D: UserGeometryData,
     C: AsIntersectContext,
-    F: for<'a> FnMut(RayN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&mut D>),
+    F: for<'a> Fn(RayN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>) + Send + Sync + 'static,
 {
     unsafe extern "C" fn inner<F, D, C>(args: *const RTCOccludedFunctionNArguments)
     where
         D: UserGeometryData,
         C: AsIntersectContext,
-        F: for<'a> FnMut(RayN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&mut D>),
+        F: for<'a> Fn(RayN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
+            + Send
+            + Sync
+            + 'static,
     {
         let data = &*((*args).geometryUserPtr as *const GeometryData);
         let cb_ptr = data
@@ -2368,11 +2424,11 @@ where
             Some(u) => (u.data, u.type_id),
             None => (std::ptr::null_mut(), TypeId::of::<()>()),
         };
-        let cb = &mut *(cb_ptr as *mut F);
+        let cb = &*(cb_ptr as *const F);
         let user_data = if user_ptr.is_null() || user_tid != TypeId::of::<D>() {
             None
         } else {
-            Some(&mut *(user_ptr as *mut D))
+            Some(&*(user_ptr as *const D))
         };
         cb(
             RayN {
@@ -2471,12 +2527,12 @@ impl<'a> ExactSizeIterator for VerticesIterMut<'a> {
 fn displacement_function<F, D>() -> RTCDisplacementFunctionN
 where
     D: UserGeometryData,
-    F: for<'a> FnMut(RTCGeometry, Vertices<'a>, u32, u32, Option<&mut D>),
+    F: for<'a> Fn(RTCGeometry, Vertices<'a>, u32, u32, Option<&D>) + Send + Sync + 'static,
 {
     unsafe extern "C" fn inner<F, D>(args: *const RTCDisplacementFunctionNArguments)
     where
         D: UserGeometryData,
-        F: for<'a> FnMut(RTCGeometry, Vertices<'a>, u32, u32, Option<&mut D>),
+        F: for<'a> Fn(RTCGeometry, Vertices<'a>, u32, u32, Option<&D>) + Send + Sync + 'static,
     {
         let data = &*((*args).geometryUserPtr as *const GeometryData);
         let cb_ptr = data
@@ -2497,11 +2553,11 @@ where
             Some(u) => (u.data, u.type_id),
             None => (std::ptr::null_mut(), TypeId::of::<()>()),
         };
-        let cb = &mut *(cb_ptr as *mut F);
+        let cb = &*(cb_ptr as *const F);
         let user_data = if user_ptr.is_null() || user_tid != TypeId::of::<D>() {
             None
         } else {
-            Some(&mut *(user_ptr as *mut D))
+            Some(&*(user_ptr as *const D))
         };
         let len = (*args).N as usize;
         let vertices = Vertices {

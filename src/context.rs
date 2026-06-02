@@ -1,4 +1,4 @@
-use crate::{sys::*, Geometry};
+use crate::sys::*;
 
 /// Trait for extended intersection context enabling passing of additional
 /// ray-query specific data.

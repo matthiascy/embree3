@@ -1,7 +1,7 @@
 //! Proves that a *capturing* interect-filter closure outlives the setter call.
 mod common;
 
-use std::{cell::RefCell, rc::Rc};
+use std::sync::{Arc, Mutex};
 
 use embree::IntersectContext;
 
@@ -12,14 +12,15 @@ fn capturing_intersect_filter_is_invoked_with_live_state() {
 
     // The proble is captured by closure; the filter pushes into it on every hit.
     // A dangling closure cannot correctly push into this Vec.
-    let probe: Rc<RefCell<Vec<u32>>> = Rc::new(RefCell::new(vec![]));
+    let probe: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(vec![]));
     let probe_in_cb = probe.clone();
 
     let mut tri = common::unit_triangle(&deviec);
     tri.set_intersect_filter_function::<_, (), IntersectContext>(
-        move |_ray, _hit, valid, _ctx, _user: Option<&mut ()>| {
+        move |_ray, _hit, valid, _ctx, _user: Option<&()>| {
             probe_in_cb
-                .borrow_mut()
+                .lock()
+                .unwrap()
                 .push(0xF11A_u32 ^ valid.len() as u32);
         },
     );
@@ -34,7 +35,7 @@ fn capturing_intersect_filter_is_invoked_with_live_state() {
     let hit = common::cast_center_ray(&scene);
     assert!(hit.hit.is_valid(), "ray should hit the triangle");
     assert_eq!(
-        *probe.borrow(),
+        *probe.lock().unwrap(),
         vec![0xF11A_u32 ^ 1],
         "filter closure must run exactly once with N=1 and live captured state"
     );

@@ -40,6 +40,11 @@ impl Drop for Device {
     }
 }
 
+// SAFETY: `Device` is a handle to a refcounted embree object whose count is
+// updated atomically. Embree permits a device to be used from multiple threads,
+// and the only interior state is `callbacks`, which is `Send + Sync` (the
+// closures are `Send + Sync`, see `ErasedFn`).
+unsafe impl Send for Device {}
 unsafe impl Sync for Device {}
 
 impl Device {
@@ -85,14 +90,13 @@ impl Device {
     ///
     /// # Thread safety
     ///
-    /// The error callback runs synchronously on the thread that reported the
-    /// error, but an embree worker thread during a parallel operation. It is
-    /// not subject to the concurrent-invocation requirement of the geometry
-    /// and memory-monitor callbacks, but its captures should still be
-    /// `Send`.
+    /// The error callback may be invoked from the thread that reported the
+    /// error, which can be an embree worker thread during a parallel
+    /// operation. Like the other callbacks it is `Fn + Send + Sync`, so it is
+    /// safe to call from and share across threads.
     pub fn set_error_function<F>(&self, error_fn: F)
     where
-        F: FnMut(RTCError, &'static str) + 'static,
+        F: Fn(RTCError, &'static str) + Send + Sync + 'static,
     {
         let mut cbs = self.callbacks.lock().unwrap();
         let erased = ErasedFn::new(error_fn);
@@ -168,12 +172,11 @@ impl Device {
     /// [`Scene::commit`](crate::Scene::commit)). The closure must therefore
     /// be safe to call from several threads at once and to share
     /// across them: it must not depend on exclusive `&mut` access to its
-    /// captures, and everything it captures must be `Send + Sync`. A future
-    /// revision will enforce this with `Fn + Send + Sync` bounds in place
-    /// of the current `FnMut`.
+    /// captures, and everything it captures must be `Send + Sync`. The
+    /// `Fn + Send + Sync` bounds on the closure enforce this.
     pub fn set_memory_monitor_function<F>(&self, monitor_fn: F)
     where
-        F: FnMut(isize, bool) -> bool + 'static,
+        F: Fn(isize, bool) -> bool + Send + Sync + 'static,
     {
         let mut cbs = self.callbacks.lock().unwrap();
         let erased = ErasedFn::new(monitor_fn);
@@ -439,16 +442,16 @@ fn create_device(config: Option<CString>) -> Result<Device, Error> {
 /// Helper function to convert a Rust closure to `RTCErrorFunction` callback.
 fn error_function<F>() -> RTCErrorFunction
 where
-    F: FnMut(RTCError, &'static str) + 'static,
+    F: Fn(RTCError, &'static str) + Send + Sync + 'static,
 {
     unsafe extern "C" fn inner<F>(
         f: *mut std::os::raw::c_void,
         error: RTCError,
         msg: *const std::os::raw::c_char,
     ) where
-        F: FnMut(RTCError, &'static str),
+        F: Fn(RTCError, &'static str) + Send + Sync + 'static,
     {
-        let cb = &mut *(f as *mut F);
+        let cb = &*(f as *const F);
         cb(error, std::ffi::CStr::from_ptr(msg).to_str().unwrap())
     }
 
@@ -459,13 +462,13 @@ where
 /// callback.
 fn memory_monitor_function<F>() -> RTCMemoryMonitorFunction
 where
-    F: FnMut(isize, bool) -> bool + 'static,
+    F: Fn(isize, bool) -> bool + Send + Sync + 'static,
 {
     unsafe extern "C" fn inner<F>(f: *mut std::os::raw::c_void, bytes: isize, post: bool) -> bool
     where
-        F: FnMut(isize, bool) -> bool,
+        F: Fn(isize, bool) -> bool + Send + Sync + 'static,
     {
-        let cb = &mut *(f as *mut F);
+        let cb = &*(f as *const F);
         cb(bytes, post)
     }
 

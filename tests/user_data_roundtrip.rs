@@ -2,7 +2,7 @@
 //! type.
 mod common;
 
-use std::{cell::RefCell, rc::Rc};
+use std::sync::{Arc, Mutex};
 
 use embree::{Bounds, GeometryKind};
 
@@ -16,7 +16,7 @@ fn user_data_reaches_bounds_callback_correctly_typed() {
     let mut scene = device.create_scene().unwrap();
 
     // Channel the callback writes its observation of `user.magic` into.
-    let seen: Rc<RefCell<Option<u32>>> = Rc::new(RefCell::new(None));
+    let seen: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
     let seen_in_cb = seen.clone();
 
     let mut geom = device.create_geometry(GeometryKind::USER).unwrap();
@@ -34,7 +34,7 @@ fn user_data_reaches_bounds_callback_correctly_typed() {
             upper_z: 1.0,
             align1: 0.0,
         };
-        *seen_in_cb.borrow_mut() = user.map(|u| u.magic);
+        *seen_in_cb.lock().unwrap() = user.map(|u| u.magic);
     });
 
     geom.commit();
@@ -45,7 +45,7 @@ fn user_data_reaches_bounds_callback_correctly_typed() {
                     // `seen`.
 
     assert_eq!(
-        *seen.borrow(),
+        *seen.lock().unwrap(),
         Some(0x1234_5678),
         "bounds callback must receive the owned user data, correctly typed"
     );
