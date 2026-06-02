@@ -73,7 +73,7 @@ impl Buffer {
     /// # Arguments
     ///
     /// * `bounds` - The range of bytes to slice into the buffer.
-    pub fn slice<S: RangeBounds<usize>>(&self, bounds: S) -> BufferSlice {
+    pub fn slice<S: RangeBounds<usize>>(&self, bounds: S) -> BufferSlice<'_> {
         let (offset, size) = range_bounds_to_offset_and_size(bounds);
         let size = size.unwrap_or_else(|| self.size.get() - offset);
         debug_assert!(offset + size <= self.size.get() && offset < self.size.get());

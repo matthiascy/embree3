@@ -1,6 +1,7 @@
 use crate::{
-    AsIntersectContext, Bounds, BuildQuality, Error, PointQuery, PointQueryContext, Ray, Ray16,
-    Ray8, RayHit, RayHit16, RayHit8, RayHitNp, RayHitPacket, RayPacket, SceneFlags,
+    callback::ErasedFn, AsIntersectContext, Bounds, BuildQuality, Error, PointQuery,
+    PointQueryContext, Ray, Ray16, Ray8, RayHit, RayHit16, RayHit8, RayHitNp, RayHitPacket,
+    RayPacket, SceneFlags,
 };
 use std::{
     any::TypeId,
@@ -21,8 +22,8 @@ use crate::{
 pub struct Scene<'a> {
     pub(crate) handle: RTCScene,
     pub(crate) device: Device,
+    progress_monitor_fn: Arc<Mutex<Option<ErasedFn>>>,
     geometries: Arc<Mutex<HashMap<u32, Geometry<'a>>>>,
-    point_query_user_data: Arc<Mutex<PointQueryUserData>>,
 }
 
 impl<'a> Clone for Scene<'a> {
@@ -32,7 +33,7 @@ impl<'a> Clone for Scene<'a> {
             handle: self.handle,
             device: self.device.clone(),
             geometries: self.geometries.clone(),
-            point_query_user_data: self.point_query_user_data.clone(),
+            progress_monitor_fn: self.progress_monitor_fn.clone(),
         }
     }
 }
@@ -59,7 +60,7 @@ impl<'a> Scene<'a> {
                 handle,
                 device,
                 geometries: Default::default(),
-                point_query_user_data: Arc::new(Mutex::new(PointQueryUserData::default())),
+                progress_monitor_fn: Arc::new(Mutex::new(None)),
             })
         }
     }
@@ -320,17 +321,14 @@ impl<'a> Scene<'a> {
         F: FnMut(&mut PointQuery, &mut PointQueryContext, Option<&mut D>, u32, u32, f32) -> bool,
     {
         let mut query_fn = query_fn;
-        let point_query_user_data = PointQueryUserData {
-            scene_closure: if query_fn.is_some() {
-                query_fn.as_mut().unwrap() as *mut F as *mut _
-            } else {
-                ptr::null_mut()
-            },
-            data: if user_data.is_some() {
-                user_data.as_mut().unwrap() as *mut D as *mut _
-            } else {
-                ptr::null_mut()
-            },
+        let mut user = PointQueryUserData {
+            scene_closure: query_fn
+                .as_mut()
+                .map_or(ptr::null_mut(), |f| f as *mut F as *mut _),
+            data: user_data
+                .as_mut()
+                .map_or(ptr::null_mut(), |d| d as *mut D as *mut _),
+
             type_id: TypeId::of::<D>(),
         };
         unsafe {
@@ -339,15 +337,11 @@ impl<'a> Scene<'a> {
                 query as *mut _,
                 context as *mut _,
                 if query_fn.is_some() {
-                    point_query_function(query_fn.as_mut().unwrap())
+                    point_query_function::<F, D>()
                 } else {
                     None
                 },
-                if query_fn.is_some() {
-                    point_query_user_data.data as *mut D as *mut _
-                } else {
-                    std::ptr::null_mut()
-                },
+                &mut user as *mut PointQueryUserData as *mut _,
             );
         }
     }
@@ -399,23 +393,27 @@ impl<'a> Scene<'a> {
     /// Must be called after the scene has been committed.
     pub fn set_progress_monitor_function<F>(&mut self, progress: F)
     where
-        F: FnMut(f64) -> bool,
+        F: FnMut(f64) -> bool + 'static,
     {
+        let mut progress_fn = self.progress_monitor_fn.lock().unwrap();
+        let erased = ErasedFn::new(progress);
         unsafe {
-            let mut closure = progress;
             rtcSetSceneProgressMonitorFunction(
                 self.handle,
-                progress_monitor_function(&mut closure),
-                &mut closure as *mut _ as *mut ::std::os::raw::c_void,
+                progress_monitor_function::<F>(),
+                erased.as_ptr(),
             );
         }
+        *progress_fn = Some(erased);
     }
 
     /// Unregister the progress monitor callback function.
     pub fn unset_progress_monitor_function(&mut self) {
+        let mut progress_fn = self.progress_monitor_fn.lock().unwrap();
         unsafe {
             rtcSetSceneProgressMonitorFunction(self.handle, None, ::std::ptr::null_mut());
         }
+        *progress_fn = None;
     }
 
     /// Finds the closest hit of a single ray with the scene.
@@ -914,15 +912,16 @@ impl Default for PointQueryUserData {
 
 /// Helper function to convert a Rust closure to `RTCProgressMonitorFunction`
 /// callback.
-fn progress_monitor_function<F>(_f: &mut F) -> RTCProgressMonitorFunction
+fn progress_monitor_function<F>() -> RTCProgressMonitorFunction
 where
-    F: FnMut(f64) -> bool,
+    F: FnMut(f64) -> bool + 'static,
 {
     unsafe extern "C" fn inner<F>(f: *mut std::os::raw::c_void, n: f64) -> bool
     where
-        F: FnMut(f64) -> bool,
+        F: FnMut(f64) -> bool + 'static,
     {
-        let cb = &mut *(f as *mut F);
+        let mutex = &*(f as *mut std::sync::Mutex<ErasedFn>);
+        let cb = &mut (*(mutex.lock().unwrap().as_ptr() as *mut F));
         cb(n)
     }
 
@@ -931,7 +930,7 @@ where
 
 /// Helper function to convert a Rust closure to `RTCPointQueryFunction`
 /// callback.
-fn point_query_function<F, D>(_f: &mut F) -> RTCPointQueryFunction
+fn point_query_function<F, D>() -> RTCPointQueryFunction
 where
     D: UserPointQueryData,
     F: FnMut(&mut PointQuery, &mut PointQueryContext, Option<&mut D>, u32, u32, f32) -> bool,

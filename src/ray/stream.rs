@@ -52,9 +52,9 @@ impl RayNp {
         }
     }
 
-    pub fn iter(&self) -> SoARayIter<RayNp> { SoARayIter::new(self, self.len()) }
+    pub fn iter(&self) -> SoARayIter<'_, RayNp> { SoARayIter::new(self, self.len()) }
 
-    pub fn iter_mut(&mut self) -> SoARayIterMut<RayNp> {
+    pub fn iter_mut(&mut self) -> SoARayIterMut<'_, RayNp> {
         let n = self.len();
         SoARayIterMut::new(self, n)
     }
@@ -287,9 +287,9 @@ impl HitNp {
         }
     }
 
-    pub fn iter(&self) -> SoAHitIter<HitNp> { SoAHitIter::new(self, self.len()) }
+    pub fn iter(&self) -> SoAHitIter<'_, HitNp> { SoAHitIter::new(self, self.len()) }
 
-    pub fn iter_hits(&self) -> impl Iterator<Item = SoAHitRef<HitNp>> {
+    pub fn iter_hits(&self) -> impl Iterator<Item = SoAHitRef<'_, HitNp>> {
         SoAHitIter::new(self, self.len()).filter(|h| h.is_valid())
     }
 
@@ -465,7 +465,7 @@ impl RayHitNp {
         }
     }
 
-    pub fn iter(&self) -> std::iter::Zip<SoARayIter<RayNp>, SoAHitIter<HitNp>> {
+    pub fn iter(&self) -> std::iter::Zip<SoARayIter<'_, RayNp>, SoAHitIter<'_, HitNp>> {
         self.ray.iter().zip(self.hit.iter())
     }
     pub fn len(&self) -> usize { self.ray.len() }

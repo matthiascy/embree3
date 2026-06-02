@@ -218,7 +218,7 @@ impl Device {
     /// [`Scene::set_flags`].
     ///
     /// See [`SceneFlags`] for possible values.
-    pub fn create_scene_with_flags(&self, flags: SceneFlags) -> Result<Scene, Error> {
+    pub fn create_scene_with_flags(&self, flags: SceneFlags) -> Result<Scene<'_>, Error> {
         Scene::new_with_flags(self.clone(), flags)
     }
 

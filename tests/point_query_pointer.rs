@@ -9,7 +9,6 @@ use std::{cell::RefCell, rc::Rc};
 use embree::{PointQuery, PointQueryContext, INVALID_ID};
 
 #[test]
-#[ignore = "RED until Plan B (callback-soundness-refactor) lands"]
 fn point_query_invokes_callback_with_live_state() {
     let device = common::device();
     let mut scene = device.create_scene().unwrap();
@@ -29,9 +28,10 @@ fn point_query_invokes_callback_with_live_state() {
         radius: 1.0,
     };
     // `RTCPointQueryContext` derives no `Default`, and the embree initializer
-    // (`rtcInitPointQueryContext`) is not wrapped. Construct it explicitly: an empty
-    // instance stack with the no-instance sentinel. The transform matrices are only
-    // read when instances are pushed, so zeros are fine for this non-instanced scene.
+    // (`rtcInitPointQueryContext`) is not wrapped. Construct it explicitly: an
+    // empty instance stack with the no-instance sentinel. The transform
+    // matrices are only read when instances are pushed, so zeros are fine for
+    // this non-instanced scene.
     let mut ctx = PointQueryContext {
         world2inst: [[0.0; 16]; 1],
         inst2world: [[0.0; 16]; 1],

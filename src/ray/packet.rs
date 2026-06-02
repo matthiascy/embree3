@@ -128,9 +128,9 @@ macro_rules! impl_ray_packets {
                     )
                 }
 
-                pub fn iter(&self) -> SoARayIter<$t> { SoARayIter::new(self, $n) }
+                pub fn iter(&self) -> SoARayIter<'_, $t> { SoARayIter::new(self, $n) }
 
-                pub fn iter_mut(&mut self) -> SoARayIterMut<$t> { SoARayIterMut::new(self, $n) }
+                pub fn iter_mut(&mut self) -> SoARayIterMut<'_, $t> { SoARayIterMut::new(self, $n) }
             }
 
             impl Default for $t {
@@ -206,9 +206,9 @@ macro_rules! impl_hit_packets {
                     self.geomID.iter().map(|g| *g != INVALID_ID)
                 }
 
-                pub fn iter(&self) -> SoAHitIter<$t> { SoAHitIter::new(self, $n) }
+                pub fn iter(&self) -> SoAHitIter<'_, $t> { SoAHitIter::new(self, $n) }
 
-                pub fn iter_hits(&self) -> impl Iterator<Item = SoAHitRef<$t>> {
+                pub fn iter_hits(&self) -> impl Iterator<Item = SoAHitRef<'_, $t>> {
                     SoAHitIter::new(self, 4).filter(|h| h.is_valid())
                 }
             }
@@ -278,7 +278,7 @@ impl RayHit4 {
             hit: Hit4::new(),
         }
     }
-    pub fn iter(&self) -> std::iter::Zip<SoARayIter<Ray4>, SoAHitIter<Hit4>> {
+    pub fn iter(&self) -> std::iter::Zip<SoARayIter<'_, Ray4>, SoAHitIter<'_, Hit4>> {
         self.ray.iter().zip(self.hit.iter())
     }
 }

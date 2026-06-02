@@ -567,7 +567,7 @@ impl<'buf> Geometry<'buf> {
     }
 
     /// Returns the buffer bound to the given slot and usage.
-    pub fn get_buffer(&self, usage: BufferUsage, slot: u32) -> Option<BufferSlice> {
+    pub fn get_buffer(&self, usage: BufferUsage, slot: u32) -> Option<BufferSlice<'_>> {
         let attachments = self.attachments.lock().unwrap();
         attachments
             .get(&usage)
@@ -991,19 +991,20 @@ impl<'buf> Geometry<'buf> {
         // points at this `Mutex<GeometryData>` and never changes.
     }
 
-    /// Returns a shared reference to the geometry's user data, if one is set and it
-    /// has type `D`.
+    /// Returns a shared reference to the geometry's user data, if one is set
+    /// and it has type `D`.
     ///
     /// # Aliasing contract
     ///
-    /// The returned reference borrows `self`. The same user data is also handed to
-    /// Embree callbacks (filter / intersect / occluded / bounds) during
-    /// [`Scene::commit`](crate::Scene::commit) and the `intersect` / `occluded` /
-    /// `point_query` calls. Embree requires geometry modification and traversal never
-    /// to overlap, so do not hold a reference obtained here across such a call, and do
-    /// not access the same geometry's data through a [`Clone`] of this handle at the
-    /// same time. (The data lives behind a shared `Arc`, so the borrow checker cannot
-    /// enforce this across clones — it is the caller's contract, matching Embree's
+    /// The returned reference borrows `self`. The same user data is also handed
+    /// to Embree callbacks (filter / intersect / occluded / bounds) during
+    /// [`Scene::commit`](crate::Scene::commit) and the `intersect` / `occluded`
+    /// / `point_query` calls. Embree requires geometry modification and
+    /// traversal never to overlap, so do not hold a reference obtained here
+    /// across such a call, and do not access the same geometry's data
+    /// through a [`Clone`] of this handle at the same time. (The data lives
+    /// behind a shared `Arc`, so the borrow checker cannot enforce this
+    /// across clones — it is the caller's contract, matching Embree's
     /// threading model.)
     pub fn get_user_data<D>(&self) -> Option<&D>
     where
@@ -1021,16 +1022,17 @@ impl<'buf> Geometry<'buf> {
             }
         };
         // SAFETY: `ptr` points at a live `D` of the checked type; the shared borrow of
-        // `self` rules out `&mut` aliases through this handle. See the aliasing contract.
+        // `self` rules out `&mut` aliases through this handle. See the aliasing
+        // contract.
         Some(unsafe { &*ptr })
     }
 
-    /// Returns a mutable reference to the geometry's user data, if one is set and it
-    /// has type `D`.
+    /// Returns a mutable reference to the geometry's user data, if one is set
+    /// and it has type `D`.
     ///
-    /// Requires `&mut self`, so the borrow checker forbids aliasing references through
-    /// this handle. The same cross-callback / cross-[`Clone`] aliasing contract as
-    /// [`Geometry::get_user_data`] applies.
+    /// Requires `&mut self`, so the borrow checker forbids aliasing references
+    /// through this handle. The same cross-callback / cross-[`Clone`]
+    /// aliasing contract as [`Geometry::get_user_data`] applies.
     pub fn get_user_data_mut<D>(&mut self) -> Option<&mut D>
     where
         D: UserGeometryData,
