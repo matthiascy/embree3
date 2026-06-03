@@ -85,12 +85,11 @@ fn create_sphere<'a>(
             }
         }
     }
-    geometry.commit();
-    geometry
+    geometry.commit()
 }
 
 fn create_ground_plane<'a>(device: &Device) -> Geometry<'a> {
-    let mut geometry = Geometry::new(device, embree::GeometryKind::TRIANGLE).unwrap();
+    let mut geometry = Geometry::new(device, embree::GeometryKind::TRIANGLE);
     {
         geometry
             .set_new_buffer(BufferUsage::VERTEX, 0, Format::FLOAT3, 16, 4)
@@ -110,12 +109,11 @@ fn create_ground_plane<'a>(device: &Device) -> Geometry<'a> {
             .unwrap()
             .copy_from_slice(&[[0, 1, 2], [1, 3, 2]]);
     }
-    geometry.commit();
-    geometry
+    geometry.commit()
 }
 
-fn animate_sphere(scene: &Scene, id: u32, pos: Vec3, radius: f32, time: f32) {
-    let mut geometry = scene.get_geometry_unchecked(id).unwrap();
+fn animate_sphere(scene: &mut Scene, id: u32, pos: Vec3, radius: f32, time: f32) {
+    let geometry = scene.get_geometry_unchecked(id).unwrap();
     let mut vertices = geometry
         .get_buffer(BufferUsage::VERTEX, 0)
         .unwrap()
@@ -137,8 +135,12 @@ fn animate_sphere(scene: &Scene, id: u32, pos: Vec3, radius: f32, time: f32) {
                 v[2] = pos.z + radius * (f * phi).sin() * theta.cos();
             }
         });
-    geometry.update_buffer(BufferUsage::VERTEX, 0);
-    geometry.commit();
+    // Done writing; drop the mapped view, then mark dirty + re-commit the attached
+    // geometry through `&mut Scene` (which excludes any concurrent traversal).
+    drop(vertices);
+    drop(geometry);
+    scene.update_geometry_buffer(id, BufferUsage::VERTEX, 0);
+    scene.commit_geometry(id);
 }
 
 const LIGHT_DIR: [f32; 3] = [0.58, 0.58, 0.58];
@@ -189,7 +191,7 @@ fn main() {
         state,
         move |time, state| {
             for i in 0..NUM_SPHERES {
-                animate_sphere(&state.scene, i as u32, positions[i], radii[i], time);
+                animate_sphere(&mut state.scene, i as u32, positions[i], radii[i], time);
             }
             state.scene.commit();
         },

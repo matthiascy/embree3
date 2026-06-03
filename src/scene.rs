@@ -1,7 +1,7 @@
 use crate::{
-    callback::ErasedFn, AsIntersectContext, Bounds, BufferUsage, BuildQuality, Error, PointQuery,
-    PointQueryContext, Ray, Ray16, Ray8, RayHit, RayHit16, RayHit8, RayHitNp, RayHitPacket,
-    RayPacket, SceneFlags, UserData,
+    callback::ErasedFn, AsIntersectContext, Bounds, BufferUsage, BuildQuality, Error, Format,
+    PointQuery, PointQueryContext, Ray, Ray16, Ray8, RayHit, RayHit16, RayHit8, RayHitNp,
+    RayHitPacket, RayPacket, SceneFlags, UserData,
 };
 use std::{
     any::TypeId,
@@ -193,6 +193,34 @@ impl<'a> Scene<'a> {
     pub fn update_geometry_buffer(&mut self, id: u32, usage: BufferUsage, slot: u32) {
         if let Some(g) = self.geometries.lock().unwrap().get(&id) {
             unsafe { rtcUpdateGeometryBuffer(g.shared.handle, usage, slot) };
+        }
+    }
+
+    /// Set the transform (column-major 4x4) of the instance geometry attached
+    /// at `id`, for the given motion-time step. Requires `&mut self` (no
+    /// live traversal); call [`Scene::commit_geometry`] (or rebuild the
+    /// scene) for it to take effect. The common per-frame
+    /// instance-animation path.
+    pub fn set_geometry_transform(&mut self, id: u32, time_step: u32, transform: &[f32; 16]) {
+        if let Some(g) = self.geometries.lock().unwrap().get(&id) {
+            unsafe {
+                rtcSetGeometryTransform(
+                    g.shared.handle,
+                    time_step,
+                    Format::FLOAT4X4_COLUMN_MAJOR,
+                    transform.as_ptr() as *const _,
+                );
+            }
+        }
+    }
+
+    /// Commit (`rtcCommitGeometry`) the geometry attached at `id` after a
+    /// dynamic edit (e.g. [`Scene::set_geometry_transform`] or
+    /// [`Scene::update_geometry_buffer`]). Requires `&mut self` (no live
+    /// traversal).
+    pub fn commit_geometry(&mut self, id: u32) {
+        if let Some(g) = self.geometries.lock().unwrap().get(&id) {
+            unsafe { rtcCommitGeometry(g.shared.handle) };
         }
     }
 

@@ -33,7 +33,7 @@ fn main() {
         .view_mut::<[u32; 3]>()
         .unwrap()
         .copy_from_slice(&[[0, 1, 2]]);
-    triangle.commit();
+    let triangle = triangle.commit();
 
     let mut scene = device.create_scene().unwrap();
     scene.attach_geometry(&triangle);

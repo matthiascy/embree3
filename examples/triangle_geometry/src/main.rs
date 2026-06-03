@@ -4,8 +4,8 @@ extern crate embree;
 extern crate support;
 
 use embree::{
-    BufferSlice, BufferUsage, Device, Format, IntersectContext, QuadMeshBuilder, Ray, RayHit,
-    TriangleMeshBuilder, INVALID_ID,
+    BufferSlice, BufferUsage, Device, Format, Geometry, IntersectContext, QuadMeshBuilder, Ray,
+    RayHit, TriangleMeshBuilder, INVALID_ID,
 };
 use glam::Vec3;
 use support::*;
@@ -13,7 +13,7 @@ use support::*;
 const DISPLAY_WIDTH: u32 = 512;
 const DISPLAY_HEIGHT: u32 = 512;
 
-fn make_cube(device: &Device, vertex_colors: &[[f32; 3]]) -> TriangleMeshBuilder<'static> {
+fn make_cube(device: &Device, vertex_colors: &[[f32; 3]]) -> Geometry<'static> {
     let mut mesh = TriangleMeshBuilder::new(device).unwrap();
     {
         mesh.set_new_buffer(BufferUsage::VERTEX, 0, Format::FLOAT3, 12, 8)
@@ -66,11 +66,10 @@ fn make_cube(device: &Device, vertex_colors: &[[f32; 3]]) -> TriangleMeshBuilder
         )
         .unwrap(); //.expect("failed to set vertex attribute buffer");
     }
-    mesh.commit();
-    mesh
+    mesh.commit()
 }
 
-fn make_ground_plane(device: &Device) -> QuadMeshBuilder<'static> {
+fn make_ground_plane(device: &Device) -> Geometry<'static> {
     let mut mesh = QuadMeshBuilder::new(device).unwrap();
     {
         mesh.set_new_buffer(BufferUsage::VERTEX, 0, Format::FLOAT3, 16, 4)
@@ -89,8 +88,7 @@ fn make_ground_plane(device: &Device) -> QuadMeshBuilder<'static> {
             .unwrap()
             .copy_from_slice(&[[0, 1, 2, 3]]);
     }
-    mesh.commit();
-    mesh
+    mesh.commit()
 }
 
 type State = DebugState<UserState>;

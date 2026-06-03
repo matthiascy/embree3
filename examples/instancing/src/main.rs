@@ -105,12 +105,11 @@ fn create_sphere(device: &Device, pos: Vector3<f32>, radius: f32) -> Geometry<'s
             }
         }
     }
-    geometry.commit();
-    geometry
+    geometry.commit()
 }
 
 fn create_ground_plane(device: &Device) -> Geometry<'static> {
-    let mut geometry = Geometry::new(device, embree::GeometryKind::TRIANGLE).unwrap();
+    let mut geometry = Geometry::new(device, embree::GeometryKind::TRIANGLE);
     {
         geometry
             .set_new_buffer(BufferUsage::VERTEX, 0, Format::FLOAT3, 16, 4)
@@ -130,8 +129,7 @@ fn create_ground_plane(device: &Device) -> Geometry<'static> {
             .unwrap()
             .copy_from_slice(&[[0, 1, 2], [1, 3, 2]]);
     }
-    geometry.commit();
-    geometry
+    geometry.commit()
 }
 
 // Animate like the Embree example.
@@ -192,28 +190,26 @@ fn main() {
     }
     scene1.commit();
 
-    // Instantiate geometries
-    let mut instances = vec![
-        InstanceGeometryBuilder::new(&device).unwrap(),
-        InstanceGeometryBuilder::new(&device).unwrap(),
-        InstanceGeometryBuilder::new(&device).unwrap(),
-        InstanceGeometryBuilder::new(&device).unwrap(),
-    ];
-
-    for inst in instances.iter_mut() {
-        inst.set_instanced_scene(&scene1);
-        inst.set_time_step_count(1);
-        inst.commit();
-        scene.attach_geometry(&inst);
-    }
+    // Instantiate geometries. Build + commit each instance, attach it, and keep its
+    // geometry ID — the per-frame transform updates go through the scene by ID.
+    const NUM_INSTANCES: usize = 4;
+    let instance_ids: Vec<u32> = (0..NUM_INSTANCES)
+        .map(|_| {
+            let mut inst = InstanceGeometryBuilder::new(&device).unwrap();
+            inst.set_instanced_scene(&scene1);
+            inst.set_time_step_count(1);
+            let inst = inst.commit();
+            scene.attach_geometry(&inst)
+        })
+        .collect();
     scene.commit();
 
     let ground_plane = create_ground_plane(&device);
     let ground_plane_id = scene.attach_geometry(&ground_plane);
 
     let user_state = UserState {
-        transforms: vec![Matrix4::identity(); instances.len()],
-        normal_transforms: vec![Matrix4::identity(); instances.len()],
+        transforms: vec![Matrix4::identity(); NUM_INSTANCES],
+        normal_transforms: vec![Matrix4::identity(); NUM_INSTANCES],
         ground_plane_id,
         light_dir: Vector3::new(1.0, 1.0, -1.0).normalize(),
     };
@@ -230,13 +226,15 @@ fn main() {
             // Update scene transformations
             animate_instances(
                 time,
-                instances.len(),
+                NUM_INSTANCES,
                 &mut state.user.transforms,
                 &mut state.user.normal_transforms,
             );
-            for (inst, tfm) in instances.iter_mut().zip(state.user.transforms.iter()) {
-                inst.set_transform(0, tfm.as_ref());
-                inst.commit();
+            // Per-frame dynamic edit of attached geometries goes through `&mut Scene`,
+            // which the borrow checker proves excludes any concurrent traversal.
+            for (id, tfm) in instance_ids.iter().zip(state.user.transforms.iter()) {
+                state.scene.set_geometry_transform(*id, 0, tfm.as_ref());
+                state.scene.commit_geometry(*id);
             }
             state.scene.commit();
         },

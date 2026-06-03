@@ -69,8 +69,9 @@ fn main() {
             ]);
 
         // Geometry objects must be committed when you are done setting them up,
-        // otherwise you will not get any intersection results.
-        triangle.commit();
+        // otherwise you will not get any intersection results. `commit` consumes
+        // the builder and returns the shareable, attachable geometry.
+        let triangle = triangle.commit();
 
         scene.attach_geometry(&triangle);
 

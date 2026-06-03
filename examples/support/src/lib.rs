@@ -134,9 +134,15 @@ impl TiledImage {
             }
         } else {
             for tile in self.tiles() {
+                // Edge tiles overhang the image when width/height are not multiples
+                // of the tile size; clamp the copied rows/cols to the image bounds
+                // (the unclamped memcpy was an out-of-bounds write — see
+                // tests/tiled_blit_overrun.rs).
+                let rows = self.height.saturating_sub(tile.y).min(self.tile_height);
+                let cols = self.width.saturating_sub(tile.x).min(self.tile_width);
                 let base_offset = (tile.y * self.width + tile.x) as usize * 4;
                 // Copy the tile pixels to the buffer per row.
-                for i in 0..self.tile_height {
+                for i in 0..rows {
                     let row_offset = self.width as usize * 4 * i as usize;
                     unsafe {
                         buffer
@@ -145,7 +151,7 @@ impl TiledImage {
                             .copy_from_nonoverlapping(
                                 tile.pixels.as_ptr().add((i * self.tile_width) as usize)
                                     as *const u8,
-                                self.tile_width as usize * 4,
+                                cols as usize * 4,
                             );
                     }
                 }
