@@ -1275,6 +1275,49 @@ impl<'buf> GeometryBuilder<'buf> {
         Some(unsafe { &mut *ptr })
     }
 
+    /// The geometry kind. Mirrors [`Geometry::kind`] for the build phase.
+    pub fn kind(&self) -> GeometryKind { self.shared.kind }
+
+    /// The raw Embree geometry handle. Mirrors [`Geometry::handle`].
+    ///
+    /// # Safety
+    ///
+    /// The handle is not reference-counted by this call and must not outlive
+    /// the geometry.
+    pub unsafe fn handle(&self) -> RTCGeometry { self.shared.handle }
+
+    /// The buffer bound to the given slot/usage. Mirrors
+    /// [`Geometry::get_buffer`].
+    pub fn get_buffer(&self, usage: BufferUsage, slot: u32) -> Option<BufferSlice<'_>> {
+        let attachments = self.shared.attachments.lock().unwrap();
+        attachments
+            .get(&usage)
+            .and_then(|v| v.iter().find(|a| a.slot == slot))
+            .map(|a| a.source)
+    }
+
+    /// A shared reference to the geometry's user data, if set and of type `D`.
+    /// Mirrors [`Geometry::get_user_data`], so user data can be inspected (and,
+    /// with [`get_user_data_mut`](GeometryBuilder::get_user_data_mut), mutated)
+    /// during the build phase.
+    pub fn get_user_data<D>(&self) -> Option<&D>
+    where
+        D: UserData,
+    {
+        let ptr: *const D = {
+            let user_data = self.shared.data.user_data.lock().unwrap();
+            match user_data.as_ref() {
+                Some(ud) if !ud.data.is_null() && ud.type_id == TypeId::of::<D>() => {
+                    ud.data as *const D
+                }
+                _ => return None,
+            }
+        };
+        // SAFETY: `ptr` points at a live `D` of the checked type; the shared borrow
+        // of `self` (the unique builder) rules out `&mut` aliases.
+        Some(unsafe { &*ptr })
+    }
+
     /// Sets the number of primitives of a user-defined geometry.
     pub fn set_user_primitive_count(&mut self, count: u32) {
         match self.shared.kind {

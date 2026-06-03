@@ -37,7 +37,7 @@ fn user_data_reaches_bounds_callback_correctly_typed() {
         *seen_in_cb.lock().unwrap() = user.map(|u| u.magic);
     });
 
-    geom.commit();
+    let geom = geom.commit();
     scene.attach_geometry(&geom);
 
     common::clobber_stack();

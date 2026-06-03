@@ -33,9 +33,10 @@ fn dropping_one_clone_does_not_free_shared_user_data() {
         };
         *seen_in_cb.lock().unwrap() = user.map(|u| u.magic);
     });
-    geom.commit();
+    let geom = geom.commit();
 
-    // Clone and drop one handle BEFORE the survivor is used.
+    // Clone and drop one handle BEFORE the survivor is used (the committed
+    // Geometry is Clone; the builder is not).
     let cloned = geom.clone();
     drop(cloned);
 

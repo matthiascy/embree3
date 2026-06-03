@@ -2,14 +2,18 @@
 #![allow(dead_code)]
 
 use embree::{
-    BufferUsage, Device, Format, Geometry, GeometryKind, IntersectContext, Ray, RayHit, Scene,
+    BufferUsage, Device, Format, GeometryBuilder, GeometryKind, IntersectContext, Ray, RayHit,
+    Scene,
 };
 
 pub fn device() -> Device {
     Device::new().expect("failed to create embree device (is EMBREE_DIR/LD_LIBRARY_PATH set?)")
 }
 
-pub fn unit_triangle(device: &Device) -> Geometry<'static> {
+/// Returns an uncommitted [`GeometryBuilder`] for a unit triangle. Callers add
+/// any further configuration (e.g. a filter function) and then `commit()`
+/// before attaching to a scene.
+pub fn unit_triangle(device: &Device) -> GeometryBuilder<'static> {
     let mut tri = device.create_geometry(GeometryKind::TRIANGLE).unwrap();
     tri.set_new_buffer(BufferUsage::VERTEX, 0, Format::FLOAT3, 3 * 4, 3)
         .unwrap()

@@ -46,7 +46,7 @@ fn bounds_callback_runs_under_concurrent_commit() {
         };
         calls_in_cb.fetch_add(1, Ordering::Relaxed);
     });
-    geom.commit();
+    let geom = geom.commit();
     scene.attach_geometry(&geom);
     scene.commit();
 

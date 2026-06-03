@@ -43,8 +43,7 @@ fn memory_monitor_closure_is_invoked_with_live_state() {
 
     // Building and committing a scene allocates through the monitored allocator.
     let mut scene = device.create_scene().unwrap();
-    let mut tri = common::unit_triangle(&device);
-    tri.commit();
+    let tri = common::unit_triangle(&device).commit();
     scene.attach_geometry(&tri);
     scene.commit();
 

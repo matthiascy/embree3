@@ -13,8 +13,7 @@ use embree::{PointQuery, PointQueryContext, INVALID_ID};
 fn point_query_invokes_callback_with_live_state() {
     let device = common::device();
     let mut scene = device.create_scene().unwrap();
-    let mut tri = common::unit_triangle(&device);
-    tri.commit();
+    let tri = common::unit_triangle(&device).commit();
     scene.attach_geometry(&tri);
     scene.commit();
 

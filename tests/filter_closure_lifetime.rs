@@ -24,7 +24,7 @@ fn capturing_intersect_filter_is_invoked_with_live_state() {
                 .push(0xF11A_u32 ^ valid.len() as u32);
         },
     );
-    tri.commit();
+    let tri = tri.commit();
     scene.attach_geometry(&tri);
     scene.commit();
 
