@@ -4,8 +4,8 @@ extern crate embree;
 extern crate support;
 
 use embree::{
-    BufferSlice, BufferUsage, Device, Format, Geometry, IntersectContext, QuadMeshBuilder, Ray,
-    RayHit, TriangleMeshBuilder, INVALID_ID,
+    BufferUsage, Device, Format, Geometry, IntersectContext, QuadMeshBuilder, Ray, RayHit,
+    TriangleMeshBuilder, INVALID_ID,
 };
 use glam::Vec3;
 use support::*;
@@ -13,12 +13,29 @@ use support::*;
 const DISPLAY_WIDTH: u32 = 512;
 const DISPLAY_HEIGHT: u32 = 512;
 
-fn make_cube(device: &Device, vertex_colors: &[[f32; 3]]) -> Geometry<'static> {
+/// Per-vertex colors, stored as `Vec3fa` (stride 16) so the last element is
+/// readable with a 16-byte SSE load: exactly how embree's C++ tutorial lays
+/// them out. Being `'static`, they can be shared zero-copy into a `'static`
+/// geometry (the windowed event loop requires `'static` state).
+static VERTEX_COLORS: [[f32; 4]; 8] = [
+    [0.0, 0.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 1.0, 1.0, 0.0],
+    [1.0, 0.0, 0.0, 0.0],
+    [1.0, 0.0, 1.0, 0.0],
+    [1.0, 1.0, 0.0, 0.0],
+    [1.0, 1.0, 1.0, 0.0],
+];
+
+fn bytes_of<T>(s: &[T]) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, std::mem::size_of_val(s)) }
+}
+
+fn make_cube(device: &Device) -> Geometry<'static> {
     let mut mesh = TriangleMeshBuilder::new(device).unwrap();
     {
-        mesh.set_new_buffer(BufferUsage::VERTEX, 0, Format::FLOAT3, 12, 8)
-            .unwrap()
-            .view_mut::<[f32; 3]>()
+        mesh.set_new_buffer::<[f32; 3]>(BufferUsage::VERTEX, 0, Format::FLOAT3, 12, 8)
             .unwrap()
             .copy_from_slice(&[
                 [-1.0, -1.0, -1.0],
@@ -30,9 +47,7 @@ fn make_cube(device: &Device, vertex_colors: &[[f32; 3]]) -> Geometry<'static> {
                 [1.0, 1.0, -1.0],
                 [1.0, 1.0, 1.0],
             ]);
-        mesh.set_new_buffer(BufferUsage::INDEX, 0, Format::UINT3, 12, 12)
-            .unwrap()
-            .view_mut::<[u32; 3]>()
+        mesh.set_new_buffer::<[u32; 3]>(BufferUsage::INDEX, 0, Format::UINT3, 12, 12)
             .unwrap()
             .copy_from_slice(&[
                 // left side
@@ -56,15 +71,19 @@ fn make_cube(device: &Device, vertex_colors: &[[f32; 3]]) -> Geometry<'static> {
             ]);
 
         mesh.set_vertex_attribute_count(1);
-        mesh.set_buffer(
+        // Zero-copy: bind the `'static` color array directly
+        // (`rtcSetSharedGeometryBuffer`). `FLOAT3` reads the first 12 bytes of each
+        // 16-byte `Vec3fa`; the trailing float makes the last element 16-byte
+        // SSE-readable, so the bound slice is exactly `8 * 16 = 128` bytes.
+        mesh.set_shared_buffer(
             BufferUsage::VERTEX_ATTRIBUTE,
             0,
             Format::FLOAT3,
-            BufferSlice::from_slice(vertex_colors, ..8),
-            12,
+            bytes_of(&VERTEX_COLORS[..]),
+            16,
             8,
         )
-        .unwrap(); //.expect("failed to set vertex attribute buffer");
+        .unwrap();
     }
     mesh.commit()
 }
@@ -72,9 +91,7 @@ fn make_cube(device: &Device, vertex_colors: &[[f32; 3]]) -> Geometry<'static> {
 fn make_ground_plane(device: &Device) -> Geometry<'static> {
     let mut mesh = QuadMeshBuilder::new(device).unwrap();
     {
-        mesh.set_new_buffer(BufferUsage::VERTEX, 0, Format::FLOAT3, 16, 4)
-            .unwrap()
-            .view_mut::<[f32; 4]>()
+        mesh.set_new_buffer::<[f32; 4]>(BufferUsage::VERTEX, 0, Format::FLOAT3, 16, 4)
             .unwrap()
             .copy_from_slice(&[
                 [-10.0, -2.0, -10.0, 0.0],
@@ -82,9 +99,7 @@ fn make_ground_plane(device: &Device) -> Geometry<'static> {
                 [10.0, -2.0, 10.0, 0.0],
                 [10.0, -2.0, -10.0, 0.0],
             ]);
-        mesh.set_new_buffer(BufferUsage::INDEX, 0, Format::UINT4, 16, 1)
-            .unwrap()
-            .view_mut::<[u32; 4]>()
+        mesh.set_new_buffer::<[u32; 4]>(BufferUsage::INDEX, 0, Format::UINT4, 16, 1)
             .unwrap()
             .copy_from_slice(&[[0, 1, 2, 3]]);
     }
@@ -107,17 +122,6 @@ fn main() {
         println!("{}: {}", err, msg);
     });
     let scene = device.create_scene().unwrap();
-    let vertex_colors = vec![
-        [0.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0],
-        [0.0, 1.0, 0.0],
-        [0.0, 1.0, 1.0],
-        [1.0, 0.0, 0.0],
-        [1.0, 0.0, 1.0],
-        [1.0, 1.0, 0.0],
-        [1.0, 1.0, 1.0],
-    ];
-
     let user_state = UserState {
         face_colors: vec![
             [1.0, 0.0, 0.0],
@@ -143,7 +147,7 @@ fn main() {
         user: user_state,
     };
 
-    let cube = make_cube(&device, &vertex_colors);
+    let cube = make_cube(&device);
     let ground = make_ground_plane(&device);
     state.user.cube_id = state.scene.attach_geometry(&cube);
     state.user.ground_id = state.scene.attach_geometry(&ground);

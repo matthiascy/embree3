@@ -26,29 +26,13 @@ fn create_sphere<'a>(
         .unwrap();
     geometry.set_build_quality(quality);
 
-    let mut vertices = geometry
-        .set_new_buffer(
-            BufferUsage::VERTEX,
-            0,
-            Format::FLOAT3,
-            16,
-            NUM_THETA * (NUM_PHI + 1),
-        )
-        .unwrap()
-        .view_mut::<[f32; 4]>()
-        .unwrap();
-
-    let mut indices = geometry
-        .set_new_buffer(
-            BufferUsage::INDEX,
-            0,
-            Format::UINT3,
-            12,
-            2 * NUM_THETA * (NUM_PHI - 1),
-        )
-        .unwrap()
-        .view_mut::<[u32; 3]>()
-        .unwrap();
+    // Fill local buffers, then copy each into its embree buffer in turn, a
+    // `set_new_buffer` view borrows the geometry exclusively, so the vertex and
+    // index views cannot be held simultaneously.
+    let n_verts = NUM_THETA * (NUM_PHI + 1);
+    let n_tris = 2 * NUM_THETA * (NUM_PHI - 1);
+    let mut vertices = vec![[0.0f32; 4]; n_verts];
+    let mut indices = vec![[0u32; 3]; n_tris];
 
     let mut tri = 0;
     let rcp_num_theta = 1.0 / NUM_THETA as f32;
@@ -85,6 +69,15 @@ fn create_sphere<'a>(
             }
         }
     }
+
+    geometry
+        .set_new_buffer::<[f32; 4]>(BufferUsage::VERTEX, 0, Format::FLOAT3, 16, n_verts)
+        .unwrap()
+        .copy_from_slice(&vertices);
+    geometry
+        .set_new_buffer::<[u32; 3]>(BufferUsage::INDEX, 0, Format::UINT3, 12, n_tris)
+        .unwrap()
+        .copy_from_slice(&indices);
     geometry.commit()
 }
 
@@ -92,9 +85,7 @@ fn create_ground_plane<'a>(device: &Device) -> Geometry<'a> {
     let mut geometry = Geometry::new(device, embree::GeometryKind::TRIANGLE);
     {
         geometry
-            .set_new_buffer(BufferUsage::VERTEX, 0, Format::FLOAT3, 16, 4)
-            .unwrap()
-            .view_mut::<[f32; 4]>()
+            .set_new_buffer::<[f32; 4]>(BufferUsage::VERTEX, 0, Format::FLOAT3, 16, 4)
             .unwrap()
             .copy_from_slice(&[
                 [-10.0, -2.0, -10.0, 0.0],
@@ -103,9 +94,7 @@ fn create_ground_plane<'a>(device: &Device) -> Geometry<'a> {
                 [10.0, -2.0, 10.0, 0.0],
             ]);
         geometry
-            .set_new_buffer(BufferUsage::INDEX, 0, Format::UINT3, 12, 2)
-            .unwrap()
-            .view_mut::<[u32; 3]>()
+            .set_new_buffer::<[u32; 3]>(BufferUsage::INDEX, 0, Format::UINT3, 12, 2)
             .unwrap()
             .copy_from_slice(&[[0, 1, 2], [1, 3, 2]]);
     }
@@ -113,32 +102,30 @@ fn create_ground_plane<'a>(device: &Device) -> Geometry<'a> {
 }
 
 fn animate_sphere(scene: &mut Scene, id: u32, pos: Vec3, radius: f32, time: f32) {
-    let geometry = scene.get_geometry_unchecked(id).unwrap();
-    let mut vertices = geometry
-        .get_buffer(BufferUsage::VERTEX, 0)
-        .unwrap()
-        .view_mut::<[f32; 4]>()
-        .unwrap();
     let num_theta_rcp = 1.0 / NUM_THETA as f32;
     let num_phi_rcp = 1.0 / NUM_PHI as f32;
     let f = 2.0 * (1.0 + 0.5 * time.sin());
 
-    vertices
-        .par_chunks_mut(NUM_THETA)
-        .enumerate()
-        .for_each(|(phi_idx, chunk)| {
-            let phi = phi_idx as f32 * num_phi_rcp * std::f32::consts::PI;
-            for (theta_idx, v) in chunk.iter_mut().enumerate() {
-                let theta = theta_idx as f32 * num_theta_rcp * 2.0 * std::f32::consts::PI;
-                v[0] = pos.x + radius * (f * phi).sin() * theta.sin();
-                v[1] = pos.y + radius * phi.cos();
-                v[2] = pos.z + radius * (f * phi).sin() * theta.cos();
-            }
-        });
-    // Done writing; drop the mapped view, then mark dirty + re-commit the attached
-    // geometry through `&mut Scene` (which excludes any concurrent traversal).
-    drop(vertices);
-    drop(geometry);
+    // Write the attached geometry's vertex buffer through `&mut Scene`: the borrow
+    // checker proves no concurrent traversal, and the mapped slice cannot escape
+    // `f`.
+    scene
+        .with_geometry_buffer_mut::<[f32; 4], _>(id, BufferUsage::VERTEX, 0, |vertices| {
+            vertices
+                .par_chunks_mut(NUM_THETA)
+                .enumerate()
+                .for_each(|(phi_idx, chunk)| {
+                    let phi = phi_idx as f32 * num_phi_rcp * std::f32::consts::PI;
+                    for (theta_idx, v) in chunk.iter_mut().enumerate() {
+                        let theta = theta_idx as f32 * num_theta_rcp * 2.0 * std::f32::consts::PI;
+                        v[0] = pos.x + radius * (f * phi).sin() * theta.sin();
+                        v[1] = pos.y + radius * phi.cos();
+                        v[2] = pos.z + radius * (f * phi).sin() * theta.cos();
+                    }
+                });
+        })
+        .unwrap();
+    // Mark dirty + re-commit the attached geometry for the change to take effect.
     scene.update_geometry_buffer(id, BufferUsage::VERTEX, 0);
     scene.commit_geometry(id);
 }

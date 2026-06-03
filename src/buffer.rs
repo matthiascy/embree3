@@ -6,10 +6,201 @@ use std::{
     ops::{Bound, Deref, DerefMut, RangeBounds},
 };
 
-use crate::{device::Device, sys::*};
+use crate::{device::Device, sys::*, Format};
 
 /// Non-zero integer type used to describe the size of a buffer.
 pub type BufferSize = NonZeroUsize;
+
+impl RTCFormat {
+    /// Size in bytes of one element of this format, or `None` for
+    /// [`Format::UNDEFINED`](crate::Format::UNDEFINED) (so a bogus format can
+    /// never silently pass a size check).
+    pub fn byte_size(self) -> Option<usize> {
+        use RTCFormat::*;
+        let n = match self {
+            UNDEFINED => return None,
+            GRID => return Some(mem::size_of::<RTCGrid>()),
+            UCHAR | CHAR => 1,
+            UCHAR2 | CHAR2 | USHORT | SHORT => 2,
+            UCHAR3 | CHAR3 => 3,
+            UCHAR4 | CHAR4 | USHORT2 | SHORT2 | UINT | INT | FLOAT => 4,
+            USHORT3 | SHORT3 => 6,
+            USHORT4 | SHORT4 | UINT2 | INT2 | FLOAT2 | ULLONG | LLONG => 8,
+            UINT3 | INT3 | FLOAT3 => 12,
+            UINT4
+            | INT4
+            | FLOAT4
+            | ULLONG2
+            | LLONG2
+            | FLOAT2X2_ROW_MAJOR
+            | FLOAT2X2_COLUMN_MAJOR => 16,
+            FLOAT5 => 20,
+            FLOAT6
+            | ULLONG3
+            | LLONG3
+            | FLOAT2X3_ROW_MAJOR
+            | FLOAT2X3_COLUMN_MAJOR
+            | FLOAT3X2_ROW_MAJOR
+            | FLOAT3X2_COLUMN_MAJOR => 24,
+            FLOAT7 => 28,
+            FLOAT8
+            | ULLONG4
+            | LLONG4
+            | FLOAT2X4_ROW_MAJOR
+            | FLOAT2X4_COLUMN_MAJOR
+            | FLOAT4X2_ROW_MAJOR
+            | FLOAT4X2_COLUMN_MAJOR => 32,
+            FLOAT9 | FLOAT3X3_ROW_MAJOR | FLOAT3X3_COLUMN_MAJOR => 36,
+            FLOAT10 => 40,
+            FLOAT11 => 44,
+            FLOAT12
+            | FLOAT3X4_ROW_MAJOR
+            | FLOAT3X4_COLUMN_MAJOR
+            | FLOAT4X3_ROW_MAJOR
+            | FLOAT4X3_COLUMN_MAJOR => 48,
+            FLOAT13 => 52,
+            FLOAT14 => 56,
+            FLOAT15 => 60,
+            FLOAT16 | FLOAT4X4_ROW_MAJOR | FLOAT4X4_COLUMN_MAJOR => 64,
+        };
+        Some(n)
+    }
+}
+
+/// Types that may safely alias the raw bytes of an embree buffer when mapping
+/// it as `[Self]`.
+///
+/// # Safety
+///
+/// Implementing this asserts ALL of:
+/// - **Any bit pattern is valid:** every sequence of `size_of::<Self>()` bytes
+///   is a valid `Self` which rules out niche types (`bool`, `char`,
+///   non-`#[repr(C)]` enums, `NonZero*`, references, `Box`).
+/// - **No pointers/provenance:** the bytes come from embree and carry no valid
+///   Rust provenance, so `Self` must contain no references or raw pointers.
+/// - **No interior mutability:** mapping hands out `&[Self]`;
+///   `Cell`/`UnsafeCell`/ atomics would allow unsound mutation through an
+///   aliased shared view.
+/// - **Padding-agnostic:** correctness must not depend on the contents of
+///   padding bytes.
+///
+/// For a custom vertex/index type: make it `#[repr(C)]` (or
+/// `#[repr(transparent)]`), give it only `BufferData` fields, derive `Copy`,
+/// then `unsafe impl BufferData for MyVertex {}`.
+pub unsafe trait BufferData: Copy {}
+
+// Fixed-width plain-data scalars. `usize`/`isize` are intentionally excluded
+// (their width is platform-dependent).
+unsafe impl BufferData for u8 {}
+unsafe impl BufferData for i8 {}
+unsafe impl BufferData for u16 {}
+unsafe impl BufferData for i16 {}
+unsafe impl BufferData for u32 {}
+unsafe impl BufferData for i32 {}
+unsafe impl BufferData for u64 {}
+unsafe impl BufferData for i64 {}
+unsafe impl BufferData for f32 {}
+unsafe impl BufferData for f64 {}
+unsafe impl<T: BufferData, const N: usize> BufferData for [T; N] {}
+
+/// Layout of a geometry buffer binding: how embree reads the bound bytes.
+/// Carried by every binding and reported by
+/// [`Geometry::get_buffer`](crate::Geometry::get_buffer).
+#[derive(Debug, Clone, Copy)]
+pub struct BufferLayout {
+    pub format: Format,
+    pub stride: usize,
+    pub count: usize,
+}
+
+/// The data source bound to a geometry buffer slot.
+///
+/// The *only* place the buffer provenance is a sum type (binding uses the typed
+/// `set_*_buffer` methods).
+#[derive(Debug)]
+pub enum BufferSource<'a> {
+    /// A sub-range of a refcounted [`Buffer`]. Owns a retained clone (a
+    /// reference would dangle once the geometry's internal lock guard
+    /// drops).
+    Managed {
+        buffer: Buffer,
+        byte_offset: usize,
+        layout: BufferLayout,
+    },
+    /// Caller-owned host memory shared zero-copy with embree.
+    Shared {
+        data: &'a [u8],
+        layout: BufferLayout,
+    },
+    /// Embree-owned, geometry-local storage. Opaque (no raw pointer exposed);
+    /// read it via the geometry's mapping methods.
+    Local {
+        size: BufferSize,
+        layout: BufferLayout,
+    },
+}
+
+/// Bytes embree may read for `count` (>= 1) elements of `format`, each `stride`
+/// apart. A **vertex** buffer (`VERTEX`/`VERTEX_ATTRIBUTE`) SSE-reads the last
+/// element up to a 16-byte boundary, so its tail is `round_up(elem, 16)`.
+/// Returns `None` on an unknown format, `count == 0`, `stride` too small / not
+/// 4-aligned, or overflow.
+pub(crate) fn required_layout_bytes(
+    format: Format,
+    stride: usize,
+    count: usize,
+    vertex: bool,
+) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    let elem = format.byte_size()?;
+    if stride < elem || stride % 4 != 0 {
+        return None;
+    }
+    let tail = if vertex {
+        elem.checked_next_multiple_of(16)?
+    } else {
+        elem
+    };
+    (count - 1).checked_mul(stride)?.checked_add(tail)
+}
+
+#[cfg(test)]
+mod format_tests {
+    use crate::Format;
+
+    #[test]
+    fn format_byte_size() {
+        assert_eq!(Format::FLOAT3.byte_size(), Some(12));
+        assert_eq!(Format::UINT3.byte_size(), Some(12));
+        assert_eq!(Format::FLOAT.byte_size(), Some(4));
+        assert_eq!(Format::FLOAT4X4_COLUMN_MAJOR.byte_size(), Some(64));
+        assert_eq!(Format::FLOAT2X3_ROW_MAJOR.byte_size(), Some(24));
+        assert_eq!(Format::UCHAR4.byte_size(), Some(4));
+        assert_eq!(Format::ULLONG2.byte_size(), Some(16));
+        assert_eq!(Format::UNDEFINED.byte_size(), None);
+        assert_eq!(
+            Format::GRID.byte_size(),
+            Some(std::mem::size_of::<crate::sys::RTCGrid>())
+        );
+    }
+
+    #[test]
+    fn required_layout_bytes_rules() {
+        use super::required_layout_bytes as req;
+        // FLOAT3, 8 elements, stride 12.
+        assert_eq!(req(Format::FLOAT3, 12, 8, false), Some(96)); // 7*12 + 12
+        assert_eq!(req(Format::FLOAT3, 12, 8, true), Some(100)); // vertex tail -> +16
+        assert_eq!(req(Format::FLOAT4, 16, 8, true), Some(128)); // already 16-aligned
+                                                                 // Rejections.
+        assert_eq!(req(Format::FLOAT3, 12, 0, false), None); // count == 0
+        assert_eq!(req(Format::UNDEFINED, 12, 8, false), None); // unknown format
+        assert_eq!(req(Format::FLOAT3, 8, 8, false), None); // stride < elem (12)
+        assert_eq!(req(Format::FLOAT3, 13, 8, false), None); // stride not 4-aligned
+        assert_eq!(req(Format::FLOAT3, usize::MAX, 8, false), None); // overflow
+    }
+}
 
 /// Handle to a buffer managed by Embree.
 #[derive(Debug)]
@@ -61,28 +252,6 @@ impl Buffer {
     /// ensure that the handle is not used after the buffer object is
     /// destroyed.
     pub unsafe fn handle(&self) -> RTCBuffer { self.handle }
-
-    /// Returns a slice of the buffer.
-    ///
-    /// This function only returns a slice of the buffer, and does not
-    /// map the buffer into memory. To map the buffer into memory, use
-    /// [`Buffer::mapped_range`] or [`BufferSlice::view`] to create a
-    /// read-only view of the buffer, or [`Buffer::mapped_range_mut`] or
-    /// [`BufferSlice::view_mut`] to create a mutable view of the buffer.
-    ///
-    /// # Arguments
-    ///
-    /// * `bounds` - The range of bytes to slice into the buffer.
-    pub fn slice<S: RangeBounds<usize>>(&self, bounds: S) -> BufferSlice<'_> {
-        let (offset, size) = range_bounds_to_offset_and_size(bounds);
-        let size = size.unwrap_or_else(|| self.size.get() - offset);
-        debug_assert!(offset + size <= self.size.get() && offset < self.size.get());
-        BufferSlice::Buffer {
-            buffer: self,
-            offset,
-            size: NonZeroUsize::new(size).unwrap(),
-        }
-    }
 
     /// Slices into the buffer for the given range.
     ///
@@ -136,117 +305,6 @@ pub struct BufferView<'buf, T: 'buf> {
 pub struct BufferViewMut<'buf, T: 'buf> {
     mapped: BufferMappedRange<'buf, T>,
     marker: PhantomData<&'buf mut T>,
-}
-
-/// Slice into a region of memory. This can either be a slice to a [`Buffer`] or
-/// a slice to memory managed by Embree (mostly created from
-/// [`rtcSetNewGeometryBuffer`]) or from user owned/borrowed memory.
-#[derive(Debug, Clone, Copy)]
-pub enum BufferSlice<'src> {
-    /// Slice into a [`Buffer`] object.
-    Buffer {
-        buffer: &'src Buffer,
-        offset: usize,
-        size: BufferSize,
-    },
-    /// Slice into memory created and managed internally inside [`RTCGeometry`].
-    GeometryLocal {
-        ptr: *mut ::std::os::raw::c_void,
-        size: BufferSize,
-        marker: PhantomData<&'src mut [::std::os::raw::c_void]>,
-    },
-    /// Slice into user borrowed/owned memory.
-    User {
-        ptr: *const u8,
-        offset: usize,
-        size: BufferSize,
-        marker: PhantomData<&'src mut [u8]>,
-    },
-}
-
-impl<'buf, T> From<&'buf [T]> for BufferSlice<'buf> {
-    fn from(vec: &'buf [T]) -> Self { BufferSlice::from_slice(vec, ..) }
-}
-
-impl<'src> BufferSlice<'src> {
-    /// Creates a new [`BufferSlice`] from a user owned buffer.
-    ///
-    /// # Arguments
-    ///
-    /// * `buffer` - The buffer to create a slice from.
-    /// * `bounds` - The range of indices to slice into the buffer. Different
-    ///   from [`Buffer::slice`],
-    pub fn from_slice<T, S: RangeBounds<usize>>(slice: &[T], bounds: S) -> Self {
-        let (first, count) = range_bounds_to_offset_and_size(bounds);
-        let count = count.unwrap_or(slice.len() - first);
-        debug_assert!(
-            first + count <= slice.len() && first < slice.len(),
-            "Invalid slice range"
-        );
-        let elem_size = mem::size_of::<T>();
-        BufferSlice::User {
-            ptr: slice.as_ptr() as *const u8,
-            offset: first * elem_size,
-            size: BufferSize::new((first + count) * elem_size).unwrap(),
-            marker: PhantomData,
-        }
-    }
-
-    pub fn view<T>(&self) -> Result<BufferView<'src, T>, Error> {
-        match self {
-            BufferSlice::Buffer {
-                buffer,
-                offset,
-                size,
-            } => {
-                let mapped = BufferMappedRange::from_buffer(buffer, *offset, size.get())?;
-                Ok(BufferView {
-                    // slice: *self,
-                    mapped,
-                    marker: PhantomData,
-                })
-            }
-            BufferSlice::GeometryLocal { ptr, size, .. } => {
-                debug_assert!(
-                    size.get() % mem::size_of::<T>() == 0,
-                    "Size of the range of the mapped buffer must be multiple of T!"
-                );
-                let len = size.get() / mem::size_of::<T>();
-                let mapped = unsafe { BufferMappedRange::from_raw_parts(*ptr as *mut T, len) };
-                Ok(BufferView {
-                    mapped,
-                    marker: PhantomData,
-                })
-            }
-            BufferSlice::User { .. } => Err(Error::INVALID_OPERATION),
-        }
-    }
-
-    pub fn view_mut<T>(&self) -> Result<BufferViewMut<'src, T>, Error> {
-        match self {
-            BufferSlice::Buffer {
-                buffer,
-                offset,
-                size,
-            } => Ok(BufferViewMut {
-                mapped: BufferMappedRange::from_buffer(buffer, *offset, size.get())?,
-                marker: PhantomData,
-            }),
-            BufferSlice::GeometryLocal { ptr, size, .. } => {
-                debug_assert!(
-                    size.get() % mem::size_of::<T>() == 0,
-                    "Size of the range of the mapped buffer must be multiple of T!"
-                );
-                let len = size.get() / mem::size_of::<T>();
-                let mapped = unsafe { BufferMappedRange::from_raw_parts(*ptr as *mut T, len) };
-                Ok(BufferViewMut {
-                    mapped,
-                    marker: PhantomData,
-                })
-            }
-            BufferSlice::User { .. } => Err(Error::INVALID_OPERATION),
-        }
-    }
 }
 
 impl<'src, T> BufferView<'src, T> {
@@ -337,6 +395,39 @@ impl<'a, T: 'a> BufferMappedRange<'a, T> {
 
     fn as_mut_slice(&mut self) -> &mut [T] {
         unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
+impl<'buf, T: BufferData> BufferViewMut<'buf, T> {
+    /// Builds a mutable view over `len` elements at `ptr` (e.g.
+    /// embree-allocated geometry-local storage returned by
+    /// `rtcSetNewGeometryBuffer`).
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be non-null, aligned for `T`, and valid for `len` `T`s for
+    /// `'buf`, and uniquely borrowed for that span (the caller holds `&'buf
+    /// mut` of the owner).
+    pub(crate) unsafe fn from_raw_parts(ptr: *mut T, len: usize) -> Self {
+        BufferViewMut {
+            mapped: BufferMappedRange::from_raw_parts(ptr, len),
+            marker: PhantomData,
+        }
+    }
+}
+
+impl<'buf, T: BufferData> BufferView<'buf, T> {
+    /// Builds a read-only view over `len` elements at `ptr`.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be non-null, aligned for `T`, and valid for `len` `T`s for
+    /// `'buf` (shared borrow; concurrent read views may coexist).
+    pub(crate) unsafe fn from_raw_parts(ptr: *mut T, len: usize) -> Self {
+        BufferView {
+            mapped: BufferMappedRange::from_raw_parts(ptr, len),
+            marker: PhantomData,
+        }
     }
 }
 

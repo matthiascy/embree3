@@ -46,29 +46,13 @@ fn create_sphere(device: &Device, pos: Vector3<f32>, radius: f32) -> Geometry<'s
         .unwrap();
     geometry.set_build_quality(BuildQuality::LOW);
 
-    let mut vertices = geometry
-        .set_new_buffer(
-            BufferUsage::VERTEX,
-            0,
-            Format::FLOAT3,
-            16,
-            NUM_THETA * (NUM_PHI + 1),
-        )
-        .unwrap()
-        .view_mut::<[f32; 4]>()
-        .unwrap();
-
-    let mut indices = geometry
-        .set_new_buffer(
-            BufferUsage::INDEX,
-            0,
-            Format::UINT3,
-            12,
-            2 * NUM_THETA * (NUM_PHI - 1),
-        )
-        .unwrap()
-        .view_mut::<[u32; 3]>()
-        .unwrap();
+    // Fill local buffers, then copy each into its embree buffer in turn. A
+    // `set_new_buffer` view borrows the geometry exclusively, so the vertex and
+    // index views cannot be held simultaneously.
+    let n_verts = NUM_THETA * (NUM_PHI + 1);
+    let n_tris = 2 * NUM_THETA * (NUM_PHI - 1);
+    let mut vertices = vec![[0.0f32; 4]; n_verts];
+    let mut indices = vec![[0u32; 3]; n_tris];
 
     let mut tri = 0;
     let rcp_num_theta = 1.0 / NUM_THETA as f32;
@@ -105,6 +89,15 @@ fn create_sphere(device: &Device, pos: Vector3<f32>, radius: f32) -> Geometry<'s
             }
         }
     }
+
+    geometry
+        .set_new_buffer::<[f32; 4]>(BufferUsage::VERTEX, 0, Format::FLOAT3, 16, n_verts)
+        .unwrap()
+        .copy_from_slice(&vertices);
+    geometry
+        .set_new_buffer::<[u32; 3]>(BufferUsage::INDEX, 0, Format::UINT3, 12, n_tris)
+        .unwrap()
+        .copy_from_slice(&indices);
     geometry.commit()
 }
 
@@ -112,9 +105,7 @@ fn create_ground_plane(device: &Device) -> Geometry<'static> {
     let mut geometry = Geometry::new(device, embree::GeometryKind::TRIANGLE);
     {
         geometry
-            .set_new_buffer(BufferUsage::VERTEX, 0, Format::FLOAT3, 16, 4)
-            .unwrap()
-            .view_mut::<[f32; 4]>()
+            .set_new_buffer::<[f32; 4]>(BufferUsage::VERTEX, 0, Format::FLOAT3, 16, 4)
             .unwrap()
             .copy_from_slice(&[
                 [-10.0, -2.0, -10.0, 0.0],
@@ -123,9 +114,7 @@ fn create_ground_plane(device: &Device) -> Geometry<'static> {
                 [10.0, -2.0, 10.0, 0.0],
             ]);
         geometry
-            .set_new_buffer(BufferUsage::INDEX, 0, Format::UINT3, 12, 2)
-            .unwrap()
-            .view_mut::<[u32; 3]>()
+            .set_new_buffer::<[u32; 3]>(BufferUsage::INDEX, 0, Format::UINT3, 12, 2)
             .unwrap()
             .copy_from_slice(&[[0, 1, 2], [1, 3, 2]]);
     }
@@ -191,7 +180,7 @@ fn main() {
     scene1.commit();
 
     // Instantiate geometries. Build + commit each instance, attach it, and keep its
-    // geometry ID — the per-frame transform updates go through the scene by ID.
+    // geometry ID; the per-frame transform updates go through the scene by ID.
     const NUM_INSTANCES: usize = 4;
     let instance_ids: Vec<u32> = (0..NUM_INSTANCES)
         .map(|_| {

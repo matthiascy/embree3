@@ -1,6 +1,6 @@
 use embree::{
-    AlignedArray, BufferSlice, BufferUsage, Device, Format, Geometry, GeometryKind,
-    IntersectContext, Ray, RayHit, Scene, SceneFlags,
+    AlignedArray, BufferUsage, Device, Format, Geometry, GeometryKind, IntersectContext, Ray,
+    RayHit, Scene, SceneFlags,
 };
 use glam::{vec3, Vec3};
 use support::{
@@ -57,35 +57,39 @@ fn displacement_du_or_dv(p: Vec3, dp_du_or_dp_dv: Vec3) -> f32 {
 
 fn create_cube(device: &Device) -> Geometry<'static> {
     let mut geom = device.create_geometry(GeometryKind::SUBDIVISION).unwrap();
-    geom.set_buffer(
+    // The cube's vertex / index / face data are geometry-local buffers filled in
+    // place. `CUBE_VERTICES` is a flat `[f32; 32]` (8 verts × 4 floats, the 4th a
+    // pad making each `Vec3fa` 16-byte SSE-readable); mapped as `f32` the
+    // 128-byte buffer holds exactly those 32 floats.
+    geom.set_new_buffer::<f32>(
         BufferUsage::VERTEX,
         0,
         Format::FLOAT3,
-        BufferSlice::from_slice(&CUBE_VERTICES.0, ..),
         4 * std::mem::size_of::<f32>(),
         8,
     )
-    .unwrap();
-    geom.set_buffer(
+    .unwrap()
+    .copy_from_slice(&CUBE_VERTICES.0);
+    geom.set_new_buffer::<u32>(
         BufferUsage::INDEX,
         0,
         Format::UINT,
-        BufferSlice::from_slice(&CUBE_INDICES, ..),
         std::mem::size_of::<u32>(),
         NUM_INDICES,
     )
-    .unwrap();
-    geom.set_buffer(
+    .unwrap()
+    .copy_from_slice(&CUBE_INDICES);
+    geom.set_new_buffer::<u32>(
         BufferUsage::FACE,
         0,
         Format::UINT,
-        BufferSlice::from_slice(&CUBE_FACES, ..),
         std::mem::size_of::<u32>(),
         NUM_FACES,
     )
-    .unwrap();
+    .unwrap()
+    .copy_from_slice(&CUBE_FACES);
 
-    geom.set_new_buffer(
+    geom.set_new_buffer::<f32>(
         BufferUsage::LEVEL,
         0,
         Format::FLOAT,
@@ -93,12 +97,10 @@ fn create_cube(device: &Device) -> Geometry<'static> {
         NUM_INDICES,
     )
     .unwrap()
-    .view_mut::<f32>()
-    .unwrap()
     .copy_from_slice(&[EDGE_LEVEL; NUM_INDICES]);
     unsafe {
         geom.set_displacement_function(
-            |_raw_geom, vertices, _prim_id, _time_step, _user_data: Option<&mut ()>| {
+            |_raw_geom, vertices, _prim_id, _time_step, _user_data: Option<&()>| {
                 for (_, ng, p) in vertices.into_iter_mut() {
                     let disp = displacement([*p[0], *p[1], *p[2]]);
                     let dp = [disp * ng[0], disp * ng[1], disp * ng[2]];
@@ -109,16 +111,13 @@ fn create_cube(device: &Device) -> Geometry<'static> {
             },
         );
     }
-    geom.commit();
-    geom
+    geom.commit()
 }
 
 fn create_ground_plane(device: &Device) -> Geometry<'static> {
     let mut mesh = device.create_geometry(GeometryKind::QUAD).unwrap();
     {
-        mesh.set_new_buffer(BufferUsage::VERTEX, 0, Format::FLOAT3, 16, 4)
-            .unwrap()
-            .view_mut::<[f32; 4]>()
+        mesh.set_new_buffer::<[f32; 4]>(BufferUsage::VERTEX, 0, Format::FLOAT3, 16, 4)
             .unwrap()
             .copy_from_slice(&[
                 [-10.0, -2.0, -10.0, 0.0],
@@ -126,14 +125,11 @@ fn create_ground_plane(device: &Device) -> Geometry<'static> {
                 [10.0, -2.0, 10.0, 0.0],
                 [10.0, -2.0, -10.0, 0.0],
             ]);
-        mesh.set_new_buffer(BufferUsage::INDEX, 0, Format::UINT4, 16, 1)
-            .unwrap()
-            .view_mut::<[u32; 4]>()
+        mesh.set_new_buffer::<[u32; 4]>(BufferUsage::INDEX, 0, Format::UINT4, 16, 1)
             .unwrap()
             .copy_from_slice(&[[0, 1, 2, 3]]);
     }
-    mesh.commit();
-    mesh
+    mesh.commit()
 }
 
 fn main() {

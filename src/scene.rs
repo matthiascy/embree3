@@ -1,6 +1,6 @@
 use crate::{
-    callback::ErasedFn, AsIntersectContext, Bounds, BufferUsage, BuildQuality, Error, Format,
-    PointQuery, PointQueryContext, Ray, Ray16, Ray8, RayHit, RayHit16, RayHit8, RayHitNp,
+    callback::ErasedFn, AsIntersectContext, Bounds, BufferData, BufferUsage, BuildQuality, Error,
+    Format, PointQuery, PointQueryContext, Ray, Ray16, Ray8, RayHit, RayHit16, RayHit8, RayHitNp,
     RayHitPacket, RayPacket, SceneFlags, UserData,
 };
 use std::{
@@ -222,6 +222,39 @@ impl<'a> Scene<'a> {
         if let Some(g) = self.geometries.lock().unwrap().get(&id) {
             unsafe { rtcCommitGeometry(g.shared.handle) };
         }
+    }
+
+    /// Mutably maps a geometry-local buffer of the attached geometry `id`,
+    /// running `f` with the data as `&mut [T]`, then returning `f`'s
+    /// result. The scoped closure is how an *attached* (shared, committed)
+    /// geometry's buffer is written: `&mut self` makes the borrow checker
+    /// prove no concurrent `intersect`/`commit` (traversal) is running, and
+    /// the slice cannot escape `f`. Call
+    /// [`update_geometry_buffer`](Scene::update_geometry_buffer) +
+    /// [`commit_geometry`](Scene::commit_geometry) afterward for the change to
+    /// take effect. `Err(INVALID_ARGUMENT)` if the slot is unbound / not a
+    /// local buffer, the `T` checks fail, or no geometry is attached at
+    /// `id`.
+    pub fn with_geometry_buffer_mut<T: BufferData, R>(
+        &mut self,
+        id: u32,
+        usage: BufferUsage,
+        slot: u32,
+        f: impl FnOnce(&mut [T]) -> R,
+    ) -> Result<R, Error> {
+        let geom = self
+            .geometries
+            .lock()
+            .unwrap()
+            .get(&id)
+            .cloned()
+            .ok_or(Error::INVALID_ARGUMENT)?;
+        let (ptr, len) = geom.shared.map_local::<T>(usage, slot)?;
+        // SAFETY: `&mut self` excludes concurrent traversal of this scene; `map_local`
+        // validated layout/alignment; `geom` (a retained clone) keeps the buffer alive
+        // for the call; and the slice cannot escape `f`.
+        let slice = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
+        Ok(f(slice))
     }
 
     /// Returns the raw underlying handle to the scene, e.g. for passing it to

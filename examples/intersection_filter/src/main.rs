@@ -10,8 +10,8 @@
 //! occluder is hit.
 
 use embree::{
-    AlignedArray, BufferSlice, BufferUsage, BuildQuality, Device, Format, Geometry, GeometryKind,
-    HitN, IntersectContextExt, Ray, RayHit, RayN, Scene, SoAHit, SoARay, ValidityN, INVALID_ID,
+    AlignedArray, BufferUsage, BuildQuality, Device, Format, Geometry, GeometryKind, HitN,
+    IntersectContextExt, Ray, RayHit, RayN, Scene, SoAHit, SoARay, ValidityN, INVALID_ID,
 };
 use glam::{vec3, Mat4, Vec3, Vec4};
 use support::{
@@ -347,7 +347,7 @@ fn intersect_filter<'a>(
     _hits: HitN<'a>,
     mut valid: ValidityN<'a>,
     ctx: &mut IntersectContext2,
-    _user_data: Option<&mut ()>,
+    _user_data: Option<&()>,
 ) {
     assert_eq!(rays.len(), 1);
 
@@ -373,7 +373,7 @@ fn intersect_filter_n<'a, 'b>(
     _hits: HitN<'a>,
     mut valid: ValidityN<'a>,
     ctx: &'b mut IntersectContext2Stream,
-    _user_data: Option<&mut ()>,
+    _user_data: Option<&()>,
 ) {
     assert_eq!(rays.len(), valid.len());
     let n = rays.len();
@@ -407,7 +407,7 @@ fn occluded_filter<'a>(
     hits: HitN<'a>,
     mut valid: ValidityN<'a>,
     context: &mut IntersectContext2,
-    _user_data: Option<&mut ()>,
+    _user_data: Option<&()>,
 ) {
     assert_eq!(rays.len(), 1);
 
@@ -447,7 +447,7 @@ fn occluded_filter_n<'a>(
     hits: HitN<'a>,
     mut valid: ValidityN<'a>,
     ctx: &mut IntersectContext2Stream,
-    _user_data: Option<&mut ()>,
+    _user_data: Option<&()>,
 ) {
     assert_eq!(rays.len(), valid.len());
     let n = rays.len();
@@ -510,9 +510,7 @@ fn occluded_filter_n<'a>(
 fn create_ground_plane<'a>(device: &Device) -> Geometry<'a> {
     let mut mesh = device.create_geometry(GeometryKind::QUAD).unwrap();
     {
-        mesh.set_new_buffer(BufferUsage::VERTEX, 0, Format::FLOAT3, 16, 4)
-            .unwrap()
-            .view_mut::<[f32; 4]>()
+        mesh.set_new_buffer::<[f32; 4]>(BufferUsage::VERTEX, 0, Format::FLOAT3, 16, 4)
             .unwrap()
             .copy_from_slice(&[
                 [-10.0, -2.0, -10.0, 0.0],
@@ -520,14 +518,11 @@ fn create_ground_plane<'a>(device: &Device) -> Geometry<'a> {
                 [10.0, -2.0, 10.0, 0.0],
                 [10.0, -2.0, -10.0, 0.0],
             ]);
-        mesh.set_new_buffer(BufferUsage::INDEX, 0, Format::UINT4, 16, 1)
-            .unwrap()
-            .view_mut::<[u32; 4]>()
+        mesh.set_new_buffer::<[u32; 4]>(BufferUsage::INDEX, 0, Format::UINT4, 16, 1)
             .unwrap()
             .copy_from_slice(&[[0, 1, 2, 3]]);
     }
-    mesh.commit();
-    mesh
+    mesh.commit()
 }
 
 fn create_cube<'a>(device: &Device, offset: Vec3, scale: Vec3, rotation: f32) -> Geometry<'a> {
@@ -540,7 +535,7 @@ fn create_cube<'a>(device: &Device, offset: Vec3, scale: Vec3, rotation: f32) ->
             * Vec4::from(v))
         .into()
     });
-    geom.set_new_buffer(
+    geom.set_new_buffer::<[f32; 4]>(
         BufferUsage::VERTEX,
         0,
         Format::FLOAT3,
@@ -548,18 +543,18 @@ fn create_cube<'a>(device: &Device, offset: Vec3, scale: Vec3, rotation: f32) ->
         CUBE_NUM_VERTICES,
     )
     .unwrap()
-    .view_mut::<[f32; 4]>()
-    .unwrap()
     .copy_from_slice(&rotated);
-    geom.set_buffer(
+    // 12 triangles, each `UINT3` (3 × u32 = 12 bytes). Mapped as `u32`, the
+    // 144-byte index buffer holds the 36 flat indices.
+    geom.set_new_buffer::<u32>(
         BufferUsage::INDEX,
         0,
         Format::UINT3,
-        BufferSlice::from_slice(CUBE_TRI_INDICES.as_slice(), ..),
         std::mem::size_of::<u32>() * 3,
         CUBE_NUM_TRI_FACES,
     )
-    .unwrap();
+    .unwrap()
+    .copy_from_slice(CUBE_TRI_INDICES.as_slice());
 
     // set intersection filter for the cube
     match MODE {
@@ -572,8 +567,7 @@ fn create_cube<'a>(device: &Device, offset: Vec3, scale: Vec3, rotation: f32) ->
             geom.set_occluded_filter_function(occluded_filter_n);
         }
     }
-    geom.commit();
-    geom
+    geom.commit()
 }
 
 fn main() {

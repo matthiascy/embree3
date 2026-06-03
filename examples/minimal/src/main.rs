@@ -38,7 +38,7 @@ fn main() {
         // Create a triangle mesh geometry, and initialise a single triangle.
         let mut triangle = device.create_geometry(GeometryKind::TRIANGLE).unwrap();
         triangle
-            .set_new_buffer(
+            .set_new_buffer::<[f32; 3]>(
                 BufferUsage::VERTEX,
                 0,
                 Format::FLOAT3,
@@ -46,23 +46,19 @@ fn main() {
                 3,
             )
             .unwrap()
-            .view_mut::<[f32; 3]>()
-            .unwrap()
             .copy_from_slice(&[
                 [0.0, 0.0, 0.0], // vertex 0
                 [1.0, 0.0, 0.0], // vertex 1
                 [0.0, 1.0, 0.0], // vertex 2
             ]);
         triangle
-            .set_new_buffer(
+            .set_new_buffer::<[u32; 3]>(
                 BufferUsage::INDEX,
                 0,
                 Format::UINT3,
                 3 * std::mem::size_of::<u32>(),
                 1,
             )
-            .unwrap()
-            .view_mut::<[u32; 3]>()
             .unwrap()
             .copy_from_slice(&[
                 [0, 1, 2], // triangle 0

@@ -18,9 +18,7 @@ fn main() {
     // Make a triangle
     let mut triangle = TriangleMeshBuilder::new(&device).unwrap();
     triangle
-        .set_new_buffer(BufferUsage::VERTEX, 0, Format::FLOAT3, 16, 3)
-        .unwrap()
-        .view_mut::<[f32; 4]>()
+        .set_new_buffer::<[f32; 4]>(BufferUsage::VERTEX, 0, Format::FLOAT3, 16, 3)
         .unwrap()
         .copy_from_slice(&[
             [-1.0, 0.0, 0.0, 0.0],
@@ -28,9 +26,7 @@ fn main() {
             [1.0, 0.0, 0.0, 0.0],
         ]);
     triangle
-        .set_new_buffer(BufferUsage::INDEX, 0, Format::UINT3, 12, 1)
-        .unwrap()
-        .view_mut::<[u32; 3]>()
+        .set_new_buffer::<[u32; 3]>(BufferUsage::INDEX, 0, Format::UINT3, 12, 1)
         .unwrap()
         .copy_from_slice(&[[0, 1, 2]]);
     let triangle = triangle.commit();

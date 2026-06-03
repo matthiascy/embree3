@@ -136,8 +136,7 @@ impl TiledImage {
             for tile in self.tiles() {
                 // Edge tiles overhang the image when width/height are not multiples
                 // of the tile size; clamp the copied rows/cols to the image bounds
-                // (the unclamped memcpy was an out-of-bounds write — see
-                // tests/tiled_blit_overrun.rs).
+                // (the unclamped memcpy was an out-of-bounds write.
                 let rows = self.height.saturating_sub(tile.y).min(self.tile_height);
                 let cols = self.width.saturating_sub(tile.x).min(self.tile_width);
                 let base_offset = (tile.y * self.width + tile.x) as usize * 4;

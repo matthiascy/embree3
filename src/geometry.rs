@@ -2,33 +2,44 @@ use std::{
     any::{Any, TypeId},
     collections::HashMap,
     marker::PhantomData,
-    num::NonZeroUsize,
     ptr,
     sync::Mutex,
 };
 
 use crate::{
-    callback::ErasedFn, sys::*, AsIntersectContext, Bounds, BufferSlice, BufferUsage, BuildQuality,
-    Device, Error, Format, GeometryKind, HitN, QuaternionDecomposition, RayHitN, RayN, Scene,
-    SubdivisionMode, UserData,
+    buffer::required_layout_bytes, callback::ErasedFn, sys::*, AsIntersectContext, Bounds, Buffer,
+    BufferData, BufferLayout, BufferSize, BufferSource, BufferUsage, BufferView, BufferViewMut,
+    BuildQuality, Device, Error, Format, GeometryKind, HitN, QuaternionDecomposition, RayHitN,
+    RayN, Scene, SubdivisionMode, UserData,
 };
 
 use std::{
     borrow::Cow,
-    ops::{Deref, DerefMut, Index, IndexMut},
+    ops::{Bound, Deref, DerefMut, Index, IndexMut, RangeBounds},
+    os::raw::c_void,
     sync::Arc,
 };
 
-// TODO(yang): maybe enforce format and stride when get the view?
-/// Information about how a (part of) buffer is bound to a geometry.
-#[derive(Debug, Clone)]
-pub(crate) struct AttachedBuffer<'src> {
-    slot: u32,
-    #[allow(dead_code)]
-    format: Format,
-    #[allow(dead_code)]
-    stride: usize,
-    source: BufferSlice<'src>,
+/// How a buffer is bound to a geometry slot (internal record; the public query
+/// form is [`BufferSource`]). `Managed` owns a retained [`Buffer`] (no `'buf`
+/// constraint); `Shared` borrows the caller's host bytes (ties `'buf`); `Local`
+/// is embree-owned.
+#[derive(Debug)]
+pub(crate) enum AttachedBuffer<'buf> {
+    Managed {
+        buffer: Buffer,
+        byte_offset: usize,
+        layout: BufferLayout,
+    },
+    Shared {
+        data: &'buf [u8],
+        layout: BufferLayout,
+    },
+    Local {
+        ptr: *mut c_void,
+        size: BufferSize,
+        layout: BufferLayout,
+    },
 }
 
 /// User-defined data for a geometry.
@@ -113,7 +124,7 @@ pub(crate) struct GeometryShared<'buf> {
     pub(crate) device: Device,
     pub(crate) handle: RTCGeometry,
     pub(crate) kind: GeometryKind,
-    pub(crate) attachments: Mutex<HashMap<BufferUsage, Vec<AttachedBuffer<'buf>>>>,
+    pub(crate) attachments: Mutex<HashMap<(BufferUsage, u32), AttachedBuffer<'buf>>>,
     pub(crate) data: GeometryData,
 }
 
@@ -124,6 +135,65 @@ impl<'buf> Drop for GeometryShared<'buf> {
         unsafe {
             rtcReleaseGeometry(self.handle);
         }
+    }
+}
+
+impl<'buf> GeometryShared<'buf> {
+    /// Snapshot of the buffer bound at `(usage, slot)`, owning/copying out of
+    /// the lock guard (a `Managed` retain clone, the `Shared` host borrow,
+    /// or `Local` metadata) so the result does not borrow the `attachments`
+    /// lock.
+    fn buffer_source(&self, usage: BufferUsage, slot: u32) -> Option<BufferSource<'buf>> {
+        let attachments = self.attachments.lock().unwrap();
+        attachments.get(&(usage, slot)).map(|a| match a {
+            AttachedBuffer::Managed {
+                buffer,
+                byte_offset,
+                layout,
+            } => BufferSource::Managed {
+                buffer: buffer.clone(),
+                byte_offset: *byte_offset,
+                layout: *layout,
+            },
+            AttachedBuffer::Shared { data, layout } => BufferSource::Shared {
+                data,
+                layout: *layout,
+            },
+            AttachedBuffer::Local { size, layout, .. } => BufferSource::Local {
+                size: *size,
+                layout: *layout,
+            },
+        })
+    }
+
+    /// Resolves a geometry-**local** buffer slot to `(ptr, element_count)` for
+    /// mapping it as `[T]`, with the runtime layout checks (`T` tiles the
+    /// allocation, `T`-aligned pointer, non-ZST). `Err(INVALID_ARGUMENT)`
+    /// if the slot is unbound or not a local buffer, or the checks fail.
+    /// Only `Local` buffers are mappable this way: `Managed`
+    /// is mapped through its `Buffer`, `Shared` is the caller's own slice.
+    pub(crate) fn map_local<T: BufferData>(
+        &self,
+        usage: BufferUsage,
+        slot: u32,
+    ) -> Result<(*mut T, usize), Error> {
+        let byte_size = {
+            let attachments = self.attachments.lock().unwrap();
+            match attachments.get(&(usage, slot)) {
+                Some(AttachedBuffer::Local { size, .. }) => size.get(),
+                _ => return Err(Error::INVALID_ARGUMENT),
+            }
+        };
+        let ptr = unsafe { rtcGetGeometryBufferData(self.handle, usage, slot) } as *mut T;
+        let t_size = std::mem::size_of::<T>();
+        if ptr.is_null()
+            || t_size == 0
+            || byte_size % t_size != 0
+            || (ptr as usize) % std::mem::align_of::<T>() != 0
+        {
+            return Err(Error::INVALID_ARGUMENT);
+        }
+        Ok((ptr, byte_size / t_size))
     }
 }
 
@@ -196,177 +266,122 @@ pub struct GeometryBuilder<'buf> {
 unsafe impl<'buf> Send for GeometryBuilder<'buf> {}
 
 impl<'buf> GeometryBuilder<'buf> {
-    /// Binds a view of a buffer to the geometry.
+    /// Binds caller-owned host memory as a geometry buffer, zero-copy
+    /// (`rtcSetSharedGeometryBuffer`). `data` must outlive the geometry; the
+    /// `'buf` borrow enforces it.
     ///
-    /// The buffer must be valid for the lifetime of the geometry. The buffer is
-    /// provided as a [`BufferSlice`], which is a view into a buffer object.
-    /// See the documentation of [`BufferSlice`] for more information.
-    ///
-    /// Under the hood, function call [`rtcSetGeometryBuffer`] is used to bind
-    /// [`BufferSlice::Buffer`] or [`BufferSlice::GeometryLocal`] to the
-    /// geometry, and [`rtcSetSharedGeometryBuffer`] is used to bind
-    /// [`BufferSlice::User`].
-    ///
-    /// # Arguments
-    ///
-    /// * `usage` - The usage of the buffer.
-    ///
-    /// * `slot` - The slot to bind the buffer to. If the provided slot is
-    ///   already bound to a buffer,
-    ///  the old bound buffer will be overwritten with the new one.
-    ///
-    /// * `format` - The format of the buffer.
-    ///
-    /// * `slice` - The buffer slice to bind.
-    ///
-    /// * `stride` - The stride of the elements in the buffer. Must be a
-    ///   multiple of 4.
-    ///
-    /// * `count` - The number of elements in the buffer.
-    pub fn set_buffer<'a>(
-        &'a mut self,
+    /// Embree reads `data[0 .. (count-1)*stride + tail]`, where `tail` is the
+    /// element size, **rounded up to 16 bytes for a vertex buffer** (embree
+    /// SSE-reads the last element). The host pointer and `stride` must be
+    /// 4-byte aligned. Pre-slice `data` for a non-zero start, there is no
+    /// separate byte offset.
+    pub fn set_shared_buffer(
+        &mut self,
         usage: BufferUsage,
         slot: u32,
         format: Format,
-        slice: BufferSlice<'buf>,
+        data: &'buf [u8],
         stride: usize,
         count: usize,
     ) -> Result<(), Error> {
-        debug_assert!(stride % 4 == 0, "Stride must be a multiple of 4!");
-        if usage == BufferUsage::VERTEX {
+        if usage == BufferUsage::VERTEX_ATTRIBUTE {
             self.check_vertex_attribute()?;
         }
-        match slice {
-            BufferSlice::Buffer {
-                buffer,
-                offset,
-                size,
-            } => {
-                let mut attachments = self.shared.attachments.lock().unwrap();
-                let bindings = attachments.entry(usage).or_insert_with(Vec::new);
-                match bindings.iter().position(|a| a.slot == slot) {
-                    // If the slot is already bound, remove the old binding and
-                    // replace it with the new one.
-                    Some(i) => {
-                        bindings.remove(i);
-                        unsafe {
-                            rtcSetGeometryBuffer(
-                                self.shared.handle,
-                                usage,
-                                slot,
-                                format,
-                                buffer.handle,
-                                offset,
-                                stride,
-                                count,
-                            )
-                        };
-                        bindings.push(AttachedBuffer {
-                            slot,
-                            source: BufferSlice::Buffer {
-                                buffer,
-                                offset,
-                                size,
-                            },
-                            format,
-                            stride,
-                        });
-                        Ok(())
-                    }
-                    // If the slot is not bound, just bind the new buffer.
-                    None => {
-                        unsafe {
-                            rtcSetGeometryBuffer(
-                                self.shared.handle,
-                                usage,
-                                slot,
-                                format,
-                                buffer.handle,
-                                offset,
-                                stride,
-                                count,
-                            )
-                        };
-                        bindings.push(AttachedBuffer {
-                            slot,
-                            source: BufferSlice::Buffer {
-                                buffer,
-                                offset,
-                                size,
-                            },
-                            format,
-                            stride,
-                        });
-                        Ok(())
-                    }
-                }
-            }
-            BufferSlice::GeometryLocal { .. } => Err(Error::INVALID_ARGUMENT),
-            BufferSlice::User {
-                ptr, offset, size, ..
-            } => {
-                let mut attachments = self.shared.attachments.lock().unwrap();
-                let bindings = attachments.entry(usage).or_insert_with(Vec::new);
-                match bindings.iter().position(|a| a.slot == slot) {
-                    // If the slot is already bound, remove the old binding and
-                    // replace it with the new one.
-                    Some(i) => {
-                        bindings.remove(i);
-                        unsafe {
-                            rtcSetSharedGeometryBuffer(
-                                self.shared.handle,
-                                usage,
-                                slot,
-                                format,
-                                ptr.add(offset) as *mut _,
-                                offset,
-                                stride,
-                                count,
-                            );
-                        };
-                        bindings.push(AttachedBuffer {
-                            slot,
-                            source: BufferSlice::User {
-                                ptr,
-                                offset,
-                                size,
-                                marker: PhantomData,
-                            },
-                            format,
-                            stride,
-                        });
-                        Ok(())
-                    }
-                    // If the slot is not bound, just bind the new buffer.
-                    None => {
-                        unsafe {
-                            rtcSetSharedGeometryBuffer(
-                                self.shared.handle,
-                                usage,
-                                slot,
-                                format,
-                                ptr.add(offset) as *mut _,
-                                offset,
-                                stride,
-                                count,
-                            );
-                        };
-                        bindings.push(AttachedBuffer {
-                            slot,
-                            source: BufferSlice::User {
-                                ptr,
-                                offset,
-                                size,
-                                marker: PhantomData,
-                            },
-                            format,
-                            stride,
-                        });
-                        Ok(())
-                    }
-                }
-            }
+        let vertex = matches!(usage, BufferUsage::VERTEX | BufferUsage::VERTEX_ATTRIBUTE);
+        let req =
+            required_layout_bytes(format, stride, count, vertex).ok_or(Error::INVALID_ARGUMENT)?;
+        if data.len() < req || (data.as_ptr() as usize) % 4 != 0 {
+            return Err(Error::INVALID_ARGUMENT);
         }
+        unsafe {
+            rtcSetSharedGeometryBuffer(
+                self.shared.handle,
+                usage,
+                slot,
+                format,
+                data.as_ptr() as *const c_void,
+                0, // caller pre-slices; embree gets no separate byteOffset
+                stride,
+                count,
+            );
+        }
+        let layout = BufferLayout {
+            format,
+            stride,
+            count,
+        };
+        self.shared
+            .attachments
+            .lock()
+            .unwrap()
+            .insert((usage, slot), AttachedBuffer::Shared { data, layout });
+        Ok(())
+    }
+
+    /// Binds a byte sub-range of a refcounted [`Buffer`]
+    /// (`rtcSetGeometryBuffer`). The geometry **retains** the buffer, so
+    /// this does not constrain the geometry's lifetime. `byte_range`'s
+    /// start is the byte offset (must be 4-byte aligned); the range must
+    /// lie within the buffer and be long enough for the layout.
+    pub fn set_managed_buffer<S: RangeBounds<usize>>(
+        &mut self,
+        usage: BufferUsage,
+        slot: u32,
+        format: Format,
+        buffer: &Buffer,
+        byte_range: S,
+        stride: usize,
+        count: usize,
+    ) -> Result<(), Error> {
+        if usage == BufferUsage::VERTEX_ATTRIBUTE {
+            self.check_vertex_attribute()?;
+        }
+        let byte_offset = match byte_range.start_bound() {
+            Bound::Included(&n) => n,
+            Bound::Excluded(&n) => n + 1,
+            Bound::Unbounded => 0,
+        };
+        let end = match byte_range.end_bound() {
+            Bound::Included(&n) => n + 1,
+            Bound::Excluded(&n) => n,
+            Bound::Unbounded => buffer.size.get(),
+        };
+        let vertex = matches!(usage, BufferUsage::VERTEX | BufferUsage::VERTEX_ATTRIBUTE);
+        let req =
+            required_layout_bytes(format, stride, count, vertex).ok_or(Error::INVALID_ARGUMENT)?;
+        if byte_offset % 4 != 0
+            || byte_offset > end
+            || end > buffer.size.get()
+            || end - byte_offset < req
+        {
+            return Err(Error::INVALID_ARGUMENT);
+        }
+        unsafe {
+            rtcSetGeometryBuffer(
+                self.shared.handle,
+                usage,
+                slot,
+                format,
+                buffer.handle,
+                byte_offset,
+                stride,
+                count,
+            );
+        }
+        let layout = BufferLayout {
+            format,
+            stride,
+            count,
+        };
+        self.shared.attachments.lock().unwrap().insert(
+            (usage, slot),
+            AttachedBuffer::Managed {
+                buffer: buffer.clone(), // rtcRetainBuffer
+                byte_offset,
+                layout,
+            },
+        );
+        Ok(())
     }
 
     /// Creates a new [`Buffer`](`crate::Buffer`) and binds it as a specific
@@ -395,45 +410,51 @@ impl<'buf> GeometryBuilder<'buf> {
     /// * `count` - The number of items in the buffer.
     ///
     /// * `stride` - The stride of the buffer items. MUST be a multiple of 4.
-    pub fn set_new_buffer(
+    pub fn set_new_buffer<T: BufferData>(
         &mut self,
         usage: BufferUsage,
         slot: u32,
         format: Format,
         stride: usize,
         count: usize,
-    ) -> Result<BufferSlice<'static>, Error> {
-        debug_assert!(stride % 4 == 0, "Stride must be a multiple of 4!");
+    ) -> Result<BufferViewMut<'_, T>, Error> {
         if usage == BufferUsage::VERTEX_ATTRIBUTE {
             self.check_vertex_attribute()?;
         }
-        {
-            let mut attachments = self.shared.attachments.lock().unwrap();
-            let bindings = attachments.entry(usage).or_insert_with(Vec::new);
-            if !bindings.iter().any(|a| a.slot == slot) {
-                let raw_ptr = unsafe {
-                    rtcSetNewGeometryBuffer(self.shared.handle, usage, slot, format, stride, count)
-                };
-                if raw_ptr.is_null() {
-                    Err(self.shared.device.get_error())
-                } else {
-                    let slice = BufferSlice::GeometryLocal {
-                        ptr: raw_ptr,
-                        size: NonZeroUsize::new(count * stride).unwrap(),
-                        marker: PhantomData,
-                    };
-                    bindings.push(AttachedBuffer {
-                        slot,
-                        source: slice,
-                        format,
-                        stride,
-                    });
-                    Ok(slice)
-                }
-            } else {
-                Err(Error::INVALID_ARGUMENT)
-            }
+        let vertex = matches!(usage, BufferUsage::VERTEX | BufferUsage::VERTEX_ATTRIBUTE);
+        // Validates count >= 1, known format, stride >= elem & 4-aligned, no overflow.
+        required_layout_bytes(format, stride, count, vertex).ok_or(Error::INVALID_ARGUMENT)?;
+        let size = stride.checked_mul(count).ok_or(Error::INVALID_ARGUMENT)?;
+        let t_size = std::mem::size_of::<T>();
+        if t_size == 0 || size % t_size != 0 {
+            return Err(Error::INVALID_ARGUMENT);
         }
+        let raw_ptr = unsafe {
+            rtcSetNewGeometryBuffer(self.shared.handle, usage, slot, format, stride, count)
+        };
+        if raw_ptr.is_null() {
+            return Err(self.shared.device.get_error());
+        }
+        if (raw_ptr as usize) % std::mem::align_of::<T>() != 0 {
+            return Err(Error::INVALID_ARGUMENT);
+        }
+        let layout = BufferLayout {
+            format,
+            stride,
+            count,
+        };
+        self.shared.attachments.lock().unwrap().insert(
+            (usage, slot),
+            AttachedBuffer::Local {
+                ptr: raw_ptr,
+                size: BufferSize::new(size).ok_or(Error::INVALID_ARGUMENT)?,
+                layout,
+            },
+        );
+        // SAFETY: embree-allocated storage of `size` bytes; `T: BufferData` tiles it
+        // (`size % t_size == 0`), the pointer is `T`-aligned, and `&mut self` (the
+        // unique builder) gives exclusive access for the returned view's borrow.
+        Ok(unsafe { BufferViewMut::from_raw_parts(raw_ptr as *mut T, size / t_size) })
     }
 
     /// Marks a buffer slice bound to this geometry as modified.
@@ -1308,12 +1329,36 @@ impl<'buf> GeometryBuilder<'buf> {
 
     /// The buffer bound to the given slot/usage. Mirrors
     /// [`Geometry::get_buffer`].
-    pub fn get_buffer(&self, usage: BufferUsage, slot: u32) -> Option<BufferSlice<'_>> {
-        let attachments = self.shared.attachments.lock().unwrap();
-        attachments
-            .get(&usage)
-            .and_then(|v| v.iter().find(|a| a.slot == slot))
-            .map(|a| a.source)
+    pub fn get_buffer(&self, usage: BufferUsage, slot: u32) -> Option<BufferSource<'_>> {
+        self.shared.buffer_source(usage, slot)
+    }
+
+    /// Maps a geometry-local buffer slot for **exclusive writing** (re-fill a
+    /// buffer created with
+    /// [`set_new_buffer`](GeometryBuilder::set_new_buffer)). Sound because
+    /// the builder is the unique owner: `&mut self` is genuine exclusive
+    /// access. `Err(INVALID_ARGUMENT)` if the slot is unbound / not a local
+    /// buffer, or the `T` layout checks fail.
+    pub fn map_buffer_mut<T: BufferData>(
+        &mut self,
+        usage: BufferUsage,
+        slot: u32,
+    ) -> Result<BufferViewMut<'_, T>, Error> {
+        let (ptr, len) = self.shared.map_local::<T>(usage, slot)?;
+        // SAFETY: `map_local` validated layout/alignment; `&mut self` (unique builder)
+        // gives exclusive access for the view's borrow.
+        Ok(unsafe { BufferViewMut::from_raw_parts(ptr, len) })
+    }
+
+    /// Maps a geometry-local buffer slot for reading.
+    pub fn map_buffer<T: BufferData>(
+        &self,
+        usage: BufferUsage,
+        slot: u32,
+    ) -> Result<BufferView<'_, T>, Error> {
+        let (ptr, len) = self.shared.map_local::<T>(usage, slot)?;
+        // SAFETY: validated; shared borrow of `self` for the view.
+        Ok(unsafe { BufferView::from_raw_parts(ptr, len) })
     }
 
     /// A shared reference to the geometry's user data, if set and of type `D`.
@@ -1645,12 +1690,26 @@ impl<'buf> Geometry<'buf> {
     pub unsafe fn handle(&self) -> RTCGeometry { self.shared.handle }
 
     /// Returns the buffer bound to the given slot and usage.
-    pub fn get_buffer(&self, usage: BufferUsage, slot: u32) -> Option<BufferSlice<'_>> {
-        let attachments = self.shared.attachments.lock().unwrap();
-        attachments
-            .get(&usage)
-            .and_then(|v| v.iter().find(|a| a.slot == slot))
-            .map(|a| a.source)
+    pub fn get_buffer(&self, usage: BufferUsage, slot: u32) -> Option<BufferSource<'_>> {
+        self.shared.buffer_source(usage, slot)
+    }
+
+    /// Maps a geometry-local buffer slot for **reading**. The returned view
+    /// borrows `&self`, so it cannot coexist with
+    /// [`try_edit`](Geometry::try_edit) (which consumes `self`), i.e. the
+    /// buffer cannot be rebound while a view is held. Concurrent read views
+    /// are fine. `Err(INVALID_ARGUMENT)` if the slot is unbound /
+    /// not a local buffer, or the `T` layout checks fail. To *write* an
+    /// attached geometry's buffer, go through
+    /// [`Scene::with_geometry_buffer_mut`](crate::Scene::with_geometry_buffer_mut).
+    pub fn map_buffer<T: BufferData>(
+        &self,
+        usage: BufferUsage,
+        slot: u32,
+    ) -> Result<BufferView<'_, T>, Error> {
+        let (ptr, len) = self.shared.map_local::<T>(usage, slot)?;
+        // SAFETY: validated; shared borrow of `self` for the view.
+        Ok(unsafe { BufferView::from_raw_parts(ptr, len) })
     }
 
     /// Returns the type of geometry of this geometry.

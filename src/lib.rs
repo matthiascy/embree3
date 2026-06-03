@@ -38,7 +38,6 @@ pub use buffer::*;
 pub use bvh::*;
 pub use context::*;
 pub use device::*;
-pub use error::*;
 pub use geometry::*;
 pub use ray::*;
 pub use scene::*;

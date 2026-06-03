@@ -15,8 +15,7 @@ fn zero_valued_property_is_ok_not_err() {
     let device = common::device();
 
     // `BACKFACE_CULLING_ENABLED` reflects the `backface_culling` config option,
-    // which defaults to off (0) on a device created without it. Under the SB-9 bug
-    // this returned `Err`; the fix must return `Ok(0)`.
+    // which defaults to off (0) on a device created without it.
     let culling = device.get_property(DeviceProperty::BACKFACE_CULLING_ENABLED);
     assert_eq!(
         culling,

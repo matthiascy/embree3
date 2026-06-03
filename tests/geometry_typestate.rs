@@ -39,7 +39,7 @@ fn detach_restores_editability() {
     let geom = common::unit_triangle(&device).commit();
     let id = scene.attach_geometry(&geom);
 
-    // Shared while attached — even a fresh clone cannot edit it.
+    // Shared while attached, even a fresh clone cannot edit it.
     assert!(
         geom.clone().try_edit().is_err(),
         "attached geometry is not editable"

@@ -15,14 +15,10 @@ pub fn device() -> Device {
 /// before attaching to a scene.
 pub fn unit_triangle(device: &Device) -> GeometryBuilder<'static> {
     let mut tri = device.create_geometry(GeometryKind::TRIANGLE).unwrap();
-    tri.set_new_buffer(BufferUsage::VERTEX, 0, Format::FLOAT3, 3 * 4, 3)
-        .unwrap()
-        .view_mut::<[f32; 3]>()
+    tri.set_new_buffer::<[f32; 3]>(BufferUsage::VERTEX, 0, Format::FLOAT3, 3 * 4, 3)
         .unwrap()
         .copy_from_slice(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
-    tri.set_new_buffer(BufferUsage::INDEX, 0, Format::UINT3, 3 * 4, 1)
-        .unwrap()
-        .view_mut::<[u32; 3]>()
+    tri.set_new_buffer::<[u32; 3]>(BufferUsage::INDEX, 0, Format::UINT3, 3 * 4, 1)
         .unwrap()
         .copy_from_slice(&[[0, 1, 2]]);
     tri
@@ -35,7 +31,7 @@ pub fn unit_triangle(device: &Device) -> GeometryBuilder<'static> {
 /// function). Used by the default-error-reporter tests.
 pub fn trigger_embree_error(device: &Device) {
     let mut geom = device.create_geometry(GeometryKind::TRIANGLE).unwrap();
-    let _ = geom.set_new_buffer(BufferUsage::VERTEX, 100, Format::FLOAT3, 3 * 4, 3);
+    let _ = geom.set_new_buffer::<[f32; 3]>(BufferUsage::VERTEX, 100, Format::FLOAT3, 3 * 4, 3);
 }
 
 /// Casts one ray straight down +z at (0.25, 0.25), which hits `unit_triangle`.

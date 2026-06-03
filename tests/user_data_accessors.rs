@@ -1,7 +1,6 @@
 //! `get_user_data` / `get_user_data_mut` round-trip after the user-data pointer
 //! unification. These read through the locked `GeometryData` (not the raw
-//! embree pointer), so this also guards against the type-confusion regression
-//! (SB-2).
+//! embree pointer), so this also guards against the type-confusion regression.
 
 mod common;
 
