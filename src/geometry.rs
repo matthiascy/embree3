@@ -162,6 +162,26 @@ impl<'buf> Drop for GeometryShared<'buf> {
 /// modified by at most one thread at a time. You may move a builder to another
 /// thread to build it there, but you cannot share it. Regain a builder from a
 /// committed geometry with [`Geometry::try_edit`].
+///
+/// A `GeometryBuilder` cannot be cloned (that would create an aliased mutable
+/// handle):
+///
+/// ```compile_fail
+/// use embree::{Device, GeometryKind};
+/// let device = Device::new().unwrap();
+/// let builder = device.create_geometry(GeometryKind::TRIANGLE).unwrap();
+/// let _alias = builder.clone(); // error: GeometryBuilder is not Clone
+/// ```
+///
+/// nor shared across threads (`!Sync`):
+///
+/// ```compile_fail
+/// use embree::{Device, GeometryKind};
+/// fn needs_sync<T: Sync>(_: &T) {}
+/// let device = Device::new().unwrap();
+/// let builder = device.create_geometry(GeometryKind::TRIANGLE).unwrap();
+/// needs_sync(&builder); // error: GeometryBuilder is not Sync
+/// ```
 #[derive(Debug)]
 pub struct GeometryBuilder<'buf> {
     pub(crate) shared: Arc<GeometryShared<'buf>>,
