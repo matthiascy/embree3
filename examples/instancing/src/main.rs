@@ -4,8 +4,8 @@ extern crate support;
 
 use cgmath::{InnerSpace, Matrix, Matrix4, SquareMatrix, Vector3, Vector4};
 use embree::{
-    BufferUsage, BuildQuality, Device, Format, Geometry, Instance, IntersectContext, Ray, RayHit,
-    SceneFlags, INVALID_ID,
+    BufferUsage, BuildQuality, Device, Format, Geometry, InstanceGeometryBuilder, IntersectContext,
+    Ray, RayHit, SceneFlags, INVALID_ID,
 };
 use support::{rgba_to_u32, Camera, DebugState, ParallelIterator, TiledImage};
 
@@ -194,10 +194,10 @@ fn main() {
 
     // Instantiate geometries
     let mut instances = vec![
-        Instance::new(&device).unwrap(),
-        Instance::new(&device).unwrap(),
-        Instance::new(&device).unwrap(),
-        Instance::new(&device).unwrap(),
+        InstanceGeometryBuilder::new(&device).unwrap(),
+        InstanceGeometryBuilder::new(&device).unwrap(),
+        InstanceGeometryBuilder::new(&device).unwrap(),
+        InstanceGeometryBuilder::new(&device).unwrap(),
     ];
 
     for inst in instances.iter_mut() {

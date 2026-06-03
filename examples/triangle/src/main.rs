@@ -3,7 +3,7 @@
 extern crate embree;
 extern crate support;
 
-use embree::{BufferUsage, Device, Format, IntersectContext, RayHitNp, RayNp, TriangleMesh};
+use embree::{BufferUsage, Device, Format, IntersectContext, RayHitNp, RayNp, TriangleMeshBuilder};
 use support::{rgba_to_u32, DebugState};
 
 fn main() {
@@ -16,7 +16,7 @@ fn main() {
     });
 
     // Make a triangle
-    let mut triangle = TriangleMesh::new(&device).unwrap();
+    let mut triangle = TriangleMeshBuilder::new(&device).unwrap();
     triangle
         .set_new_buffer(BufferUsage::VERTEX, 0, Format::FLOAT3, 16, 3)
         .unwrap()

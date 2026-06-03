@@ -58,7 +58,7 @@ mod tests {
     /// Round-trips a closure through `ErasedFn` exactly as a trampoline does:
     /// box it, recover the *concrete* `F` from the type-erased pointer as a
     /// shared `&F`, call it, then drop the owner. Recovering as `*const F`
-    /// (the real closure type, shared) is the sound cast — a shared `&F` is
+    /// (the real closure type, shared) is the sound cast; a shared `&F` is
     /// what lets concurrent callbacks not alias.
     fn roundtrip<F>(f: F, x: u32) -> u32
     where

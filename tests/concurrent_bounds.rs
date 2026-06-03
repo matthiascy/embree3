@@ -1,6 +1,5 @@
 //! Proves a user-geometry bounds callback is invoked correctly under a
-//! concurrent (multi-threaded) commit — the `Fn + Send + Sync` contract from
-//! SB-5.
+//! concurrent (multi-threaded) commit.
 //!
 //! With the default device the BVH build over many user primitives
 //! parallelizes, so the bounds callback fires from several worker threads at

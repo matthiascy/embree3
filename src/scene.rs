@@ -1,5 +1,5 @@
 use crate::{
-    callback::ErasedFn, AsIntersectContext, Bounds, BuildQuality, Error, PointQuery,
+    callback::ErasedFn, AsIntersectContext, Bounds, BufferUsage, BuildQuality, Error, PointQuery,
     PointQueryContext, Ray, Ray16, Ray8, RayHit, RayHit16, RayHit8, RayHitNp, RayHitPacket,
     RayPacket, SceneFlags, UserData,
 };
@@ -48,8 +48,8 @@ impl<'a> Drop for Scene<'a> {
 
 // SAFETY: `Scene` is a handle to a refcounted embree object that embree permits
 // to be traversed from multiple threads concurrently after commit. Its interior
-// state — the progress closure (`Send + Sync`, see `ErasedFn`) and the attached
-// geometries (whose callbacks/user data are now `Send + Sync`) — is safe to
+// state: the progress closure (`Send + Sync`, see `ErasedFn`) and the attached
+// geometries (whose callbacks/user data are now `Send + Sync`), are safe to
 // share. Bound host buffers must, per the caller's contract, outlive the scene
 // and be safe to read concurrently during traversal. Mutation goes through
 // `&mut self`.
@@ -97,6 +97,9 @@ impl<'a> Scene<'a> {
     /// dependent way.
     pub fn attach_geometry(&mut self, geometry: &Geometry<'a>) -> u32 {
         let id = unsafe { rtcAttachGeometry(self.handle, geometry.shared.handle) };
+        // Retain a wrapper clone so the geometry's `Arc` strong-count is >= 2 while
+        // attached. That is what makes `Geometry::try_edit` fail (mutation
+        // impossible) until the geometry is detached from every scene.
         self.geometries.lock().unwrap().insert(id, geometry.clone());
         id
     }
@@ -159,6 +162,37 @@ impl<'a> Scene<'a> {
         } else {
             let geometries = self.geometries.lock().unwrap();
             geometries.get(&id).cloned()
+        }
+    }
+
+    /// Enable a geometry attached at `id`. Requires `&mut self`, so no
+    /// `intersect` can be running. Call `commit` afterward for the change
+    /// to take effect. (Multi-scene caveat: enable/disable is a
+    /// geometry-global flag, so this does not exclude a concurrent
+    /// `intersect` on a *different* scene holding the same geometry).
+    pub fn enable_geometry(&mut self, id: u32) {
+        if let Some(g) = self.geometries.lock().unwrap().get(&id) {
+            unsafe {
+                rtcEnableGeometry(g.shared.handle);
+            }
+        }
+    }
+
+    /// Disable a geometry attached at `id` (the counterpart of
+    /// [`Scene::enable_geometry`]); same `&mut self` / commit / multi-scene
+    /// rules.
+    pub fn disable_geometry(&mut self, id: u32) {
+        if let Some(g) = self.geometries.lock().unwrap().get(&id) {
+            unsafe { rtcDisableGeometry(g.shared.handle) };
+        }
+    }
+
+    /// Mark a buffer of the geometry attached at `id` as modified, so embree
+    /// re-reads it on the next commit. Requires `&mut self` (no live
+    /// traversal).
+    pub fn update_geometry_buffer(&mut self, id: u32, usage: BufferUsage, slot: u32) {
+        if let Some(g) = self.geometries.lock().unwrap().get(&id) {
+            unsafe { rtcUpdateGeometryBuffer(g.shared.handle, usage, slot) };
         }
     }
 
@@ -287,10 +321,12 @@ impl<'a> Scene<'a> {
     /// * `user_data` - The user defined data that is passed to the callback.
     ///
     /// A callback function can still get attached to a specific [`Geometry`]
-    /// object using [`Geometry::set_point_query_function`]. If a callback
-    /// function is attached to a geometry, and (a potentially different)
-    /// callback function is passed to this function, both functions will be
-    /// called for the primitives of the according geometries.
+    /// object using
+    /// [`GeometryBuilder::set_point_query_function`](crate::GeometryBuilder::set_point_query_function).
+    /// If a callback function is attached to a geometry, and (a potentially
+    /// different) callback function is passed to this function, both
+    /// functions will be called for the primitives of the according
+    /// geometries.
     ///
     /// The query radius can be decreased inside the callback function, which
     /// allows to efficiently cull parts of the scene during BVH traversal.
@@ -904,7 +940,7 @@ impl<'a> Scene<'a> {
 }
 
 /// User data for callback of [`Scene::point_query`] and
-/// [`Geometry::set_point_query_function`].
+/// [`GeometryBuilder::set_point_query_function`](crate::GeometryBuilder::set_point_query_function).
 #[derive(Debug)]
 pub(crate) struct PointQueryCallbackData {
     pub scene_closure: *mut std::os::raw::c_void,

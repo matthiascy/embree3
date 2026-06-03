@@ -86,7 +86,7 @@ pub type SubdivisionMode = sys::RTCSubdivisionMode;
 pub type GeometryKind = sys::RTCGeometryType;
 
 /// Marker trait for types usable as callback user data: geometry user data
-/// ([`Geometry::set_user_data`]) or point-query user data
+/// ([`GeometryBuilder::set_user_data`]) or point-query user data
 /// ([`Scene::point_query`]).
 ///
 /// The blanket impl covers every `Send + Sync + 'static` type. The bounds are

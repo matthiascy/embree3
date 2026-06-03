@@ -1,6 +1,6 @@
 use crate::{
     callback::ErasedFn, sys::*, Buffer, BufferSize, Bvh, DeviceProperty, Error, Geometry,
-    GeometryKind, Scene, SceneFlags,
+    GeometryBuilder, GeometryKind, Scene, SceneFlags,
 };
 use std::{
     ffi::CString,
@@ -270,8 +270,8 @@ impl Device {
 
     /// Creates a [`Geometry`] object bound to the device without any
     /// buffers attached.
-    pub fn create_geometry<'a>(&self, kind: GeometryKind) -> Result<Geometry<'a>, Error> {
-        Geometry::new(self, kind)
+    pub fn create_geometry<'a>(&self, kind: GeometryKind) -> Result<GeometryBuilder<'a>, Error> {
+        Ok(Geometry::new(self, kind))
     }
 }
 

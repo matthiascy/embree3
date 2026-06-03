@@ -37,12 +37,12 @@ pub unsafe trait AsIntersectContext {
 ///
 /// A filter function can be specified inside the context. This function is
 /// invoked as a second filter stage after the per-geometry intersect
-/// [`Geometry::set_intersect_filter_function`] or occluded filter
-/// [`Geometry::set_occluded_filter_function`] function is invoked. Only rays
-/// that passed the first filter stage are valid in this second filter stage.
-/// Having such a per ray-query filter function can be useful to implement
-/// modifications of the behavior of the query, such as collecting all hits or
-/// accumulating transparencies.
+/// [`GeometryBuilder::set_intersect_filter_function`](crate::GeometryBuilder::set_intersect_filter_function) or occluded filter
+/// [`GeometryBuilder::set_occluded_filter_function`](crate::GeometryBuilder::set_occluded_filter_function) function is invoked. Only
+/// rays that passed the first filter stage are valid in this second filter
+/// stage. Having such a per ray-query filter function can be useful to
+/// implement modifications of the behavior of the query, such as collecting all
+/// hits or accumulating transparencies.
 ///
 /// It is guaranteed that the intersection context passed to a ray query is
 /// directly passed to the registered callback function. This means that it's

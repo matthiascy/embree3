@@ -81,7 +81,7 @@ pub(crate) struct GeometryCallbacks {
 /// The block itself is immutable; each concern has its own lock, so
 /// application-side user-data access never contends with callback
 /// (de)registration:
-/// - [`callbacks`](Self::callbacks): the `ErasedFn` closures — set rarely, read
+/// - [`callbacks`](Self::callbacks): the `ErasedFn` closures; set rarely, read
 ///   by the embree trampolines.
 /// - [`user_data`](Self::user_data): the application's per-geometry data.
 ///
@@ -127,137 +127,55 @@ impl<'buf> Drop for GeometryShared<'buf> {
     }
 }
 
-/// Wrapper around an Embree geometry object.
+/// The **mutable build/edit phase** of an Embree geometry.
 ///
-/// A new geometry is created using [`Device::create_geometry`] or
-/// new methods of different geometry types. Depending on the geometry type,
-/// different buffers must be bound (e.g. using [`Geometry::set_buffer`]) to set
-/// up the geometry data. In most cases, binding of a vertex and index buffer is
-/// required. The number of primitives and vertices of that geometry is
-/// typically inferred from the size of these bound buffers.
+/// A geometry starts here (created via [`Device::create_geometry`]), the typed
+/// constructors (`TriangleMesh::new`, `QuadMesh::new`, ...), or
+/// [`Geometry::new`]. You configure it in this phase and then call
+/// [`commit`](GeometryBuilder::commit) to obtain a shareable, read-only
+/// [`Geometry`] that can be attached to scenes.
 ///
-/// Changes to the geometry always must be committed using the
-/// [`Geometry::commit`] call before using the geometry. After committing, a
-/// geometry is not yet included in any scene. A geometry can be added to a
-/// scene by using the [`Scene::attach_geometry`](crate::Scene::attach_geometry)
-/// function (to automatically assign a geometry ID) or using the
-/// [`Scene::attach_geometry_by_id`](crate::Scene::attach_geometry_by_id)
-/// function (to specify the geometry ID manually). A geometry can get attached
-/// to multiple scenes.
+/// Depending on the geometry type, different buffers must be bound (typically
+/// a vertex and an index buffer) using
+/// [`set_buffer`](GeometryBuilder::set_buffer) or
+/// [`set_new_buffer`](GeometryBuilder::set_new_buffer). The primitive and
+/// vertex counts are usually inferred from the bound buffer sizes.
 ///
-/// All geometry types support multi-segment motion blur with an arbitrary
-/// number of equidistant time steps (in the range of 2 to 129) inside a user
-/// specified time range. Each geometry can have a different number of time
-/// steps and a different time range. The motion blur geometry is defined by
-/// linearly interpolating the geometries of neighboring time steps. To
-/// construct a motion blur geometry, first the number of time steps of the
-/// geometry must be specified using [`Geometry::set_time_step_count`], and then
-/// a vertex buffer for each time step must be bound, e.g. using the
-/// [`Geometry::set_buffer`] function. Optionally, a time range defining the
-/// start (and end time) of the first (and last) time step can be set using the
-/// rtcSetGeometryTimeRange function. This feature will also allow geometries to
-/// appear and disappear during the camera shutter time if the time range is a
-/// sub range of \[0,1\].
+/// All geometry types support multi-segment motion blur with 2..=129
+/// equidistant time steps inside a user-specified time range: set the count
+/// with [`set_time_step_count`](GeometryBuilder::set_time_step_count), bind one
+/// vertex buffer per time step, and optionally a time range (geometries may
+/// also appear / disappear during the shutter if the range is a sub-range of
+/// `[0, 1]`).
 ///
-/// The API supports per-geometry filter callback functions (see
-/// [`Geometry::set_intersect_filter_function`]
-/// and set_occluded_filter_function) that are invoked for each intersection
-/// found during the Scene::intersect or Scene::occluded calls. The former ones
-/// are called geometry intersection filter functions, the latter ones geometry
-/// occlusion filter functions. These filter functions are designed to be used
-/// to ignore intersections outside of a user- defined silhouette of a
-/// primitive, e.g. to model tree leaves using transparency textures
+/// Per-geometry intersection / occlusion **filter** callbacks
+/// ([`set_intersect_filter_function`](GeometryBuilder::set_intersect_filter_function)
+/// and the occlusion counterpart) are invoked for each hit found during
+/// `Scene::intersect` / `Scene::occluded` and let you discard intersections
+/// (e.g. to model alpha-cutout silhouettes such as tree leaves).
 ///
-/// It does not own the buffers that are bound to it, but it does own the
-/// geometry object itself.
-#[derive(Debug, Clone)]
-pub struct Geometry<'buf> {
+/// # Thread safety
+///
+/// `GeometryBuilder` is `Send` but **not** `Sync` and **not** `Clone`: it is
+/// the *unique* owner of its geometry, so `&mut self` is genuine exclusive
+/// access. That is exactly embree's contract that a single geometry must be
+/// modified by at most one thread at a time. You may move a builder to another
+/// thread to build it there, but you cannot share it. Regain a builder from a
+/// committed geometry with [`Geometry::try_edit`].
+#[derive(Debug)]
+pub struct GeometryBuilder<'buf> {
     pub(crate) shared: Arc<GeometryShared<'buf>>,
 }
 
-impl<'buf> Geometry<'buf> {
-    /// Creates a new geometry object.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use embree::{Device, Geometry, GeometryKind};
-    ///
-    /// let device = Device::new().unwrap();
-    /// let geometry = Geometry::new(&device, GeometryKind::TRIANGLE).unwrap();
-    /// ```
-    ///
-    /// or use the [`Device::create_geometry`] method:
-    ///
-    /// ```no_run
-    /// use embree::{Device, GeometryKind};
-    ///
-    /// let device = Device::new().unwrap();
-    /// let geometry = device.create_geometry(GeometryKind::TRIANGLE).unwrap();
-    /// ```
-    pub fn new<'dev>(device: &'dev Device, kind: GeometryKind) -> Result<Geometry<'buf>, Error> {
-        let handle = unsafe { rtcNewGeometry(device.handle, kind) };
-        let shared = Arc::new(GeometryShared {
-            device: device.clone(),
-            handle,
-            kind,
-            attachments: Mutex::new(HashMap::new()),
-            data: GeometryData::default(),
-        });
-        unsafe {
-            rtcSetGeometryUserData(handle, Arc::as_ptr(&shared) as *mut _);
-        }
-        Ok(Geometry { shared })
-    }
+// SAFETY: a `GeometryBuilder` is the *unique* owner of its
+// `Arc<GeometryShared>` (it is never `Clone`d, and `try_edit` only produces one
+// when strong_count == 1). Its state is `Send` (closures are `Fn + Send +
+// Sync`, user data `Send + Sync`). Moving it transfers exclusive access, which
+// maps exactly to embree's "one thread modifies one geometry". It is
+// intentionally NOT `Sync` and NOT `Clone`.
+unsafe impl<'buf> Send for GeometryBuilder<'buf> {}
 
-    /// Disables the geometry.
-    ///
-    /// A disabled geometry is not rendered. Each geometry is enabled by
-    /// default at construction time.
-    /// After disabling a geometry, the scene containing that geometry must
-    /// be committed using rtcCommitScene for the change to have effect.
-    pub fn disable(&self) {
-        unsafe {
-            rtcDisableGeometry(self.shared.handle);
-        }
-    }
-
-    /// Enables the geometry.
-    ///
-    /// Only enabled geometries are rendered. Each geometry is enabled by
-    /// default at construction time.
-    ///
-    /// After enabling a geometry, the scene containing that geometry must be
-    /// committed using [`Geometry::commit`] for the change to have effect.
-    pub fn enable(&self) {
-        unsafe {
-            rtcEnableGeometry(self.shared.handle);
-        }
-    }
-
-    /// Returns the raw Embree geometry handle.
-    ///
-    /// # Safety
-    ///
-    /// Use this function only if you know what you are doing. The returned
-    /// handle is a raw pointer to an Embree reference-counted object. The
-    /// reference count is not increased by this function, so the caller must
-    /// ensure that the handle is not used after the geometry object is
-    /// destroyed.
-    pub unsafe fn handle(&self) -> RTCGeometry { self.shared.handle }
-
-    /// Checks if the vertex attribute is allowed for the geometry.
-    ///
-    /// This function do not check if the slot of the vertex attribute.
-    fn check_vertex_attribute(&self) -> Result<(), Error> {
-        match self.shared.kind {
-            GeometryKind::GRID | GeometryKind::USER | GeometryKind::INSTANCE => {
-                Err(Error::INVALID_OPERATION)
-            }
-            _ => Ok(()),
-        }
-    }
-
+impl<'buf> GeometryBuilder<'buf> {
     /// Binds a view of a buffer to the geometry.
     ///
     /// The buffer must be valid for the lifetime of the geometry. The buffer is
@@ -498,15 +416,6 @@ impl<'buf> Geometry<'buf> {
         }
     }
 
-    /// Returns the buffer bound to the given slot and usage.
-    pub fn get_buffer(&self, usage: BufferUsage, slot: u32) -> Option<BufferSlice<'_>> {
-        let attachments = self.shared.attachments.lock().unwrap();
-        attachments
-            .get(&usage)
-            .and_then(|v| v.iter().find(|a| a.slot == slot))
-            .map(|a| a.source)
-    }
-
     /// Marks a buffer slice bound to this geometry as modified.
     ///
     /// If a data buffer is changed by the application, this function must be
@@ -514,18 +423,62 @@ impl<'buf> Geometry<'buf> {
     /// assigned to a buffer slot is initially marked as modified, thus this
     /// method needs to be called only when doing buffer modifications after the
     /// first [`Scene::commit`] call.
-    pub fn update_buffer(&self, usage: BufferUsage, slot: u32) {
+    pub fn update_buffer(&mut self, usage: BufferUsage, slot: u32) {
         unsafe {
             rtcUpdateGeometryBuffer(self.shared.handle, usage, slot);
         }
     }
 
-    /// Returns the type of geometry of this geometry.
-    pub fn kind(&self) -> GeometryKind { self.shared.kind }
-
-    pub fn commit(&mut self) {
+    /// Disables the geometry, so it is not rendered. Each geometry is enabled
+    /// by default at construction time.
+    ///
+    /// This modifies the geometry, so it lives on the builder (the build/edit
+    /// phase). To toggle a geometry that is already attached to a scene during
+    /// a render loop, use
+    /// [`Scene::disable_geometry`](crate::Scene::disable_geometry)
+    /// instead (it excludes concurrent traversal via `&mut Scene`). After the
+    /// change, the containing scene must be committed for it to take effect.
+    pub fn disable(&mut self) {
         unsafe {
-            rtcCommitGeometry(self.shared.handle);
+            rtcDisableGeometry(self.shared.handle);
+        }
+    }
+
+    /// Enables the geometry, so it is rendered. Each geometry is enabled by
+    /// default at construction time.
+    ///
+    /// See [`GeometryBuilder::disable`] for the build-phase vs. dynamic
+    /// ([`Scene::enable_geometry`](crate::Scene::enable_geometry)) distinction.
+    /// After the change, the containing scene must be committed for it to take
+    /// effect.
+    pub fn enable(&mut self) {
+        unsafe {
+            rtcEnableGeometry(self.shared.handle);
+        }
+    }
+
+    /// Sets the number of vertex attributes of the geometry.
+    ///
+    /// This function sets the number of slots for vertex attributes buffers
+    /// (BufferUsage::VERTEX_ATTRIBUTE) that can be used for the specified
+    /// geometry.
+    ///
+    /// Only supported by triangle meshes, quad meshes, curves, points, and
+    /// subdivision geometries.
+    ///
+    /// # Arguments
+    ///
+    /// * `count` - The number of vertex attribute slots.
+    pub fn set_vertex_attribute_count(&mut self, count: u32) {
+        match self.shared.kind {
+            // Vertex attributes are not supported by these kinds; no-op.
+            GeometryKind::GRID | GeometryKind::USER | GeometryKind::INSTANCE => {}
+            _ => {
+                // Update the vertex attribute count.
+                unsafe {
+                    rtcSetGeometryVertexAttributeCount(self.shared.handle, count);
+                }
+            }
         }
     }
 
@@ -557,12 +510,173 @@ impl<'buf> Geometry<'buf> {
         }
     }
 
+    /// Sets the tessellation rate for a subdivision mesh or flat curves.
+    ///
+    /// For curves, the tessellation rate specifies the number of ray-facing
+    /// quads per curve segment. For subdivision surfaces, the tessellation
+    /// rate specifies the number of quads along each edge.
+    pub fn set_tessellation_rate(&mut self, rate: f32) {
+        match self.shared.kind {
+            GeometryKind::SUBDIVISION
+            | GeometryKind::FLAT_LINEAR_CURVE
+            | GeometryKind::FLAT_BEZIER_CURVE
+            | GeometryKind::ROUND_LINEAR_CURVE
+            | GeometryKind::ROUND_BEZIER_CURVE => unsafe {
+                rtcSetGeometryTessellationRate(self.shared.handle, rate);
+            },
+            _ => panic!(
+                "GeometryBuilder::set_tessellation_rate is only supported for subdivision meshes \
+                 and flat curves"
+            ),
+        }
+    }
+
+    /// Sets the mask for the geometry.
+    ///
+    /// This geometry mask is used together with the ray mask stored inside the
+    /// mask field of the ray. The primitives of the geometry are hit by the ray
+    /// only if the bitwise and operation of the geometry mask with the ray mask
+    /// is not 0.
+    /// This feature can be used to disable selected geometries for specifically
+    /// tagged rays, e.g. to disable shadow casting for certain geometries.
+    ///
+    /// Ray masks are disabled in Embree by default at compile time, and can be
+    /// enabled through the `EMBREE_RAY_MASK` parameter in CMake. One can query
+    /// whether ray masks are enabled by querying the
+    /// [`DeviceProperty::RAY_MASK_SUPPORTED`](`crate::DeviceProperty::RAY_MASK_SUPPORTED`)
+    /// device property using [`Device::get_property`].
+    pub fn set_mask(&mut self, mask: u32) {
+        unsafe {
+            rtcSetGeometryMask(self.shared.handle, mask);
+        }
+    }
+
+    /// Sets the number of time steps for multi-segment motion blur for the
+    /// geometry.
+    ///
+    /// For triangle meshes, quad meshes, curves, points, and subdivision
+    /// geometries, the number of time steps directly corresponds to the
+    /// number of vertex buffer slots available [`BufferUsage::VERTEX`].
+    ///
+    /// For instance geometries, a transformation must be specified for each
+    /// time step (see [`GeometryBuilder::set_transform`]).
+    ///
+    /// For user geometries, the registered bounding callback function must
+    /// provide a bounding box per primitive and time step, and the
+    /// intersection and occlusion callback functions should properly
+    /// intersect the motion-blurred geometry at the ray time.
+    pub fn set_time_step_count(&mut self, count: u32) {
+        unsafe {
+            rtcSetGeometryTimeStepCount(self.shared.handle, count);
+        }
+    }
+
+    /// Sets the time range for a motion blur geometry.
+    ///
+    /// The time range is defined relative to the camera shutter interval
+    /// \[0,1\] but it can be arbitrary. Thus the `start` time can be
+    /// smaller, equal, or larger 0, indicating a geometry whose animation
+    /// definition start before, at, or after the camera shutter opens.
+    /// Similar the `end` time can be smaller, equal, or larger than 1,
+    /// indicating a geometry whose animation definition ends after, at, or
+    /// before the camera shutter closes. The `start` time has to be smaller
+    /// or equal to the `end` time.
+    ///
+    /// The default time range when this function is not called is the entire
+    /// camera shutter \[0,1\]. For best performance at most one time segment
+    /// of the piece wise linear definition of the motion should fall
+    /// outside the shutter window to the left and to the right. Thus do not
+    /// set the `start` time or `end` time too far outside the
+    /// \[0,1\] interval for best performance.
+    ///
+    /// This time range feature will also allow geometries to appear and
+    /// disappear during the camera shutter time if the specified time range
+    /// is a sub range of \[0,1\].
+    ///
+    /// Please also have a look at the [`GeometryBuilder::set_time_step_count`]
+    /// to see how to define the time steps for the specified time range.
+    pub fn set_time_range(&mut self, start: f32, end: f32) {
+        unsafe {
+            rtcSetGeometryTimeRange(self.shared.handle, start, end);
+        }
+    }
+
+    /// Sets the user-defined data pointer of the geometry.
+    ///
+    /// The user data pointer is intended to be pointing to the application's
+    /// representation of the geometry, and is passed to various callback
+    /// functions.
+    ///
+    /// The application can use this pointer inside the callback functions to
+    /// access its geometry representation.
+    ///
+    /// Note that the user data pointer is shared across all clones of the
+    /// geometry, and the user is responsible for ensuring that the data
+    /// behind the pointer is valid for the lifetime of all geometry clones. To
+    /// avoid dangling pointers, the user can use `set_owned_user_data` to let
+    /// the geometry own the user data, which will be automatically dropped when
+    /// the geometry is destroyed.
+    ///
+    /// # Access from callbacks and thread safety
+    ///
+    /// `D` must be [`Send`] + [`Sync`] (see [`UserData`]). Callbacks
+    /// (filter / intersect / occluded / bounds / displacement) receive the data
+    /// as a shared `Option<&D>` and may run from several threads
+    /// concurrently, so:
+    ///
+    /// - **Read** it freely inside callbacks.
+    /// - To **mutate it from inside a callback**, use `Sync` interior
+    ///   mutability (`Mutex`, `RwLock`, atomics) *within* `D`; a
+    ///   `Cell`/`RefCell` field would make `D: !Sync` and fail to compile.
+    /// - To **mutate it from outside callbacks**, use
+    ///   [`GeometryBuilder::get_user_data_mut`], which is gated by `&mut self`
+    ///   (so it cannot overlap a traversal) and needs no interior mutability.
+    pub fn set_user_data<'a: 'buf, D>(&'buf mut self, user_data: &'a mut D)
+    where
+        D: UserData,
+    {
+        *self.shared.data.user_data.lock().unwrap() = Some(UserDataSlot {
+            data: user_data as *mut D as *mut std::os::raw::c_void,
+            type_id: TypeId::of::<D>(),
+            owner: None,
+        });
+    }
+
+    /// Sets the user-defined data of the geometry and let the geometry own it.
+    ///
+    /// The user data is the application's representation of the geometry and is
+    /// passed to the various callback functions. Unlike
+    /// [`GeometryBuilder::set_user_data`], the geometry owns `user_data`: there
+    /// is no dangling-pointer risk, and it is dropped when the last
+    /// clone of the geometry is dropped.
+    ///
+    /// The same callback-access and thread-safety contract as
+    /// [`GeometryBuilder::set_user_data`] applies (`D: Send + Sync`; callbacks
+    /// receive a shared `&D`; mutate via interior mutability inside a
+    /// callback, or [`GeometryBuilder::get_user_data_mut`] outside).
+    pub fn set_owned_user_data<D>(&mut self, user_data: D)
+    where
+        D: UserData,
+    {
+        let raw: *mut D = Box::into_raw(Box::new(user_data));
+        let owner: Box<dyn Any + Send + Sync> = unsafe { Box::from_raw(raw) };
+
+        // Replacing the Option drops any previous owner, freeing old owned data once.
+        *self.shared.data.user_data.lock().unwrap() = Some(UserDataSlot {
+            data: raw as *mut D as *mut std::os::raw::c_void,
+            type_id: TypeId::of::<D>(),
+            owner: Some(owner),
+        });
+        // No rtcSetGeometryUserData call: the pointer set in `new` already
+        // points at this `GeometryData` control block and never changes.
+    }
+
     /// Registers an intersection filter callback function for the geometry.
     ///
     /// Only a single callback function can be registered per geometry, and
     /// further invocations overwrite the previously set callback function.
     /// Unregister the callback function by calling
-    /// [`Geometry::unset_intersect_filter_function`].
+    /// [`GeometryBuilder::unset_intersect_filter_function`].
     ///
     /// The registered filter function is invoked for every hit encountered
     /// during the intersect-type ray queries and can accept or reject that
@@ -583,7 +697,7 @@ impl<'buf> Geometry<'buf> {
     /// structure. The valid parameter of that structure points to an
     /// integer valid mask (0 means invalid and -1 means valid). The
     /// `geometryUserPtr` member is a user pointer optionally set per
-    /// geometry through the [`Geometry::set_user_data`] function. The
+    /// geometry through the [`GeometryBuilder::set_user_data`] function. The
     /// context member points to the intersection context passed to
     /// the ray query function. The ray parameter points to N rays in SOA layout
     /// (see `RayN`, `HitN`).
@@ -622,7 +736,7 @@ impl<'buf> Geometry<'buf> {
     ///
     /// # Thread safety
     ///
-    /// Embree may invoke this callback from multiple threads concurrently — for
+    /// Embree may invoke this callback from multiple threads concurrently, for
     /// example during a parallel [`Scene::commit`](crate::Scene::commit),
     /// or when ray queries are issued from several threads on a shared
     /// scene. The closure must therefore be safe to call from several
@@ -665,7 +779,7 @@ impl<'buf> Geometry<'buf> {
     /// Only a single callback function can be registered per geometry, and
     /// further invocations overwrite the previously set callback function.
     /// Unregister the callback function by calling
-    /// [`Geometry::unset_occluded_filter_function`].
+    /// [`GeometryBuilder::unset_occluded_filter_function`].
     ///
     /// The registered intersection filter function is invoked for every hit
     /// encountered during the occluded-type ray queries and can accept or
@@ -675,12 +789,12 @@ impl<'buf> Geometry<'buf> {
     /// reject hits that are outside the silhouette. E.g. a tree leaf could
     /// be modeled with an alpha texture that decides whether hit points lie
     /// inside or outside the leaf. Please see the description of the
-    /// [`Geometry::set_intersect_filter_function`] for a description of the
-    /// filter callback function.
+    /// [`GeometryBuilder::set_intersect_filter_function`] for a description of
+    /// the filter callback function.
     ///
     /// # Thread safety
     ///
-    /// Embree may invoke this callback from multiple threads concurrently — for
+    /// Embree may invoke this callback from multiple threads concurrently, for
     /// example during a parallel [`Scene::commit`](crate::Scene::commit),
     /// or when ray queries are issued from several threads on a shared
     /// scene. The closure must therefore be safe to call from several
@@ -721,7 +835,7 @@ impl<'buf> Geometry<'buf> {
     // user pointer but we can't set it here, instead we can only set it in the
     // rtcPointQuery function which is attached to the scene. This requires the
     // user to call [`Scene::point_query`] first and then call
-    // [`Geometry::set_point_query_function`] to set the closure. Or we can
+    // [`GeometryBuilder::set_point_query_function`] to set the closure. Or we can
     // make the closure a member of the [`GeometryData`] and set it here.
 
     /// Sets the point query callback function for a geometry.
@@ -729,7 +843,7 @@ impl<'buf> Geometry<'buf> {
     /// Only a single callback function can be registered per geometry and
     /// further invocations overwrite the previously set callback function.
     /// Unregister the callback function by calling
-    /// [`Geometry::unset_point_query_function`].
+    /// [`GeometryBuilder::unset_point_query_function`].
     ///
     /// The registered callback function is invoked by rtcPointQuery for every
     /// primitive of the geometry that intersects the corresponding point query
@@ -809,201 +923,328 @@ impl<'buf> Geometry<'buf> {
         // accepts a Rust closure instead of a raw fn.
     }
 
-    /// Sets the tessellation rate for a subdivision mesh or flat curves.
+    /// Sets a callback to query the bounding box of user-defined primitives.
     ///
-    /// For curves, the tessellation rate specifies the number of ray-facing
-    /// quads per curve segment. For subdivision surfaces, the tessellation
-    /// rate specifies the number of quads along each edge.
-    pub fn set_tessellation_rate(&mut self, rate: f32) {
+    /// Only a single callback function can be registered per geometry, and
+    /// further invocations overwrite the previously set callback function.
+    ///
+    /// Unregister the callback function by calling
+    /// [`GeometryBuilder::unset_bounds_function`].
+    ///
+    /// The registered bounding box callback function is invoked to calculate
+    /// axis- aligned bounding boxes of the primitives of the user-defined
+    /// geometry during spatial acceleration structure construction.
+    ///
+    /// The arguments of the callback closure are:
+    ///
+    /// - a shared reference to the user data of the geometry
+    ///
+    /// - the ID of the primitive to calculate the bounds for
+    ///
+    /// - the time step at which to calculate the bounds
+    ///
+    /// - a mutable reference to the bounding box where the result should be
+    ///   written to
+    ///
+    /// In a typical usage scenario one would store a pointer to the internal
+    /// representation of the user geometry object using
+    /// [`GeometryBuilder::set_user_data`]. The callback function can then read
+    /// that pointer from the `geometryUserPtr` field and calculate the
+    /// proper bounding box for the requested primitive and time, and store
+    /// that bounding box to the destination structure (`bounds_o` member).
+    ///
+    /// # Thread safety
+    ///
+    /// Embree may invoke this callback from multiple threads concurrently, for
+    /// example during a parallel [`Scene::commit`](crate::Scene::commit),
+    /// or when ray queries are issued from several threads on a shared
+    /// scene. The closure must therefore be safe to call from several
+    /// threads at once and to share across them: it must not depend
+    /// on exclusive `&mut` access to its captures, and everything it captures
+    /// must be `Send + Sync`. The `Fn + Send + Sync` bounds on the closure
+    /// enforce this.
+    pub fn set_bounds_function<F, D>(&mut self, bounds: F)
+    where
+        D: UserData,
+        F: Fn(&mut Bounds, u32, u32, Option<&D>) + Send + Sync + 'static,
+    {
         match self.shared.kind {
-            GeometryKind::SUBDIVISION
-            | GeometryKind::FLAT_LINEAR_CURVE
-            | GeometryKind::FLAT_BEZIER_CURVE
-            | GeometryKind::ROUND_LINEAR_CURVE
-            | GeometryKind::ROUND_BEZIER_CURVE => unsafe {
-                rtcSetGeometryTessellationRate(self.shared.handle, rate);
+            GeometryKind::USER => unsafe {
+                let erased = ErasedFn::new(bounds);
+                rtcSetGeometryBoundsFunction(
+                    self.shared.handle,
+                    bounds_function::<F, D>(),
+                    ptr::null_mut(),
+                );
+                self.shared.data.callbacks.lock().unwrap().user_bounds = Some(erased);
             },
-            _ => panic!(
-                "Geometry::set_tessellation_rate is only supported for subdivision meshes and \
-                 flat curves"
-            ),
+            // Bounds functions apply only to user geometry; ignored otherwise.
+            _ => {}
         }
     }
 
-    /// Sets the mask for the geometry.
-    ///
-    /// This geometry mask is used together with the ray mask stored inside the
-    /// mask field of the ray. The primitives of the geometry are hit by the ray
-    /// only if the bitwise and operation of the geometry mask with the ray mask
-    /// is not 0.
-    /// This feature can be used to disable selected geometries for specifically
-    /// tagged rays, e.g. to disable shadow casting for certain geometries.
-    ///
-    /// Ray masks are disabled in Embree by default at compile time, and can be
-    /// enabled through the `EMBREE_RAY_MASK` parameter in CMake. One can query
-    /// whether ray masks are enabled by querying the
-    /// [`DeviceProperty::RAY_MASK_SUPPORTED`](`crate::DeviceProperty::RAY_MASK_SUPPORTED`)
-    /// device property using [`Device::get_property`].
-    pub fn set_mask(&mut self, mask: u32) {
-        unsafe {
-            rtcSetGeometryMask(self.shared.handle, mask);
+    /// Unsets the callback to calculate the bounding box of user-defined
+    /// geometry.
+    pub fn unset_bounds_function(&mut self) {
+        match self.shared.kind {
+            GeometryKind::USER => unsafe {
+                rtcSetGeometryBoundsFunction(self.shared.handle, None, ptr::null_mut());
+                self.shared.data.callbacks.lock().unwrap().user_bounds = None;
+            },
+            _ => panic!("Only user geometries can have a bounds function!"),
         }
     }
 
-    /// Sets the number of time steps for multi-segment motion blur for the
+    /// Sets the callback function to intersect a user geometry.
+    ///
+    /// The registered
+    ///   callback function is invoked by intersect-type ray queries to
+    ///   calculate the intersection of a ray packet of variable size with one
+    ///   user-defined primitive.
+    /// Only a single callback function can be registered per geometry and
+    /// further invocations overwrite the previously set callback function.
+    /// Unregister the callback function by calling
+    /// [`GeometryBuilder::unset_intersect_function`].
+    ///
+    ///
+    /// # Arguments
+    ///
+    /// - `intersect`: The callback function to register. The task of the
+    ///   callback function is to intersect each active ray from the ray packet
+    ///   with the specified user primitive. If the user-defined primitive is
+    ///   missed by a ray of the ray packet, the function should return without
+    ///   modifying the ray or hit. If an intersection of the user-defined
+    ///   primitive with the ray is found in the range `tnear` to `tfar`, it
+    ///   should update the hit distance of the ray (`tfar` member) and the
+    ///   hit(`u`, `v`, `instID`, `geomID`, `primID` members). In particular,
+    ///   the currently intersected instance is stored in the `instID` field of
+    ///   the intersection context, which must be deep-copied into the `instID`
+    ///   member of the hit structure.
+    ///
+    ///   The callback function gets passed a number of arguments:
+    ///     - the ray hit packet of variable size N (see [`RayHitN`]); it
+    ///       contains valid data, in particular the `tfar` value is the current
+    ///       closest hit distance found. All data inside the `hit` component of
+    ///       the ray hit structure are undefined and should **NOT** be read by
+    ///       the function.
+    ///     - the valid masks for each ray in the packet (see [`ValidityN`])
+    ///     - a mutable reference to the intersection context (see
+    ///       [`IntersectContext`](`crate::IntersectContext`) and
+    ///       [`IntersectContextExt`](`crate::IntersectContextExt`))
+    ///     - the geometry ID of the geometry to intersect
+    ///     - the primitive ID of the primitive to intersect
+    ///     - a shared reference to the user data of the geometry (if any); the
+    ///       user data can be set using [`GeometryBuilder::set_user_data`]
+    ///
+    /// The ray component of the ray hit structure contains valid data, in
+    /// particular the tfar value is the current closest hit distance found.
+    /// All data inside the hit component of the [`RayHitN`] structure are
+    /// undefined and should **NOT** be *read* by the function (writing is ok).
+    ///
+    /// As a primitive might have multiple intersections with a ray, the
+    /// intersection filter function needs to be invoked by the user
+    /// geometry intersection callback for each encountered intersection, if
+    /// filtering of intersections is desired. This can be achieved through
+    /// the [`GeometryBuilder::set_intersect_filter_function`].
+    ///
+    /// - Within the user geometry intersect function, it is safe to trace new
+    ///   rays and create new scenes and geometries.
+    ///
+    /// - When performing ray queries using [`Scene::intersect`], it is
+    ///   guaranteed that the packet size is 1 when the callback is invoked.
+    ///
+    /// - When performing ray queries using the
+    ///   [`Scene::intersect4`]/[`Scene::intersect8`]/[`Scene::intersect16`]
+    ///   functions, it is **not** generally guaranteed that the ray packet size
+    ///   (and order of rays inside the packet) passed to the callback matches
+    ///   the initial ray packet. However, under some circumstances these
+    ///   properties are guaranteed, and whether this is the case can be queried
+    ///   using [`Device::get_property`].
+    ///
+    /// - When performing ray queries using the stream API such as
+    ///   [`Scene::intersect_stream_soa`], [`Scene::intersect_stream_aos`], the
+    ///   order of rays and ray packet size of the callback function might
+    ///   change to either 1, 4, 8, or 16.
+    ///
+    /// - For many usage scenarios, repacking and re-ordering of rays does not
+    ///   cause difficulties in implementing the callback function. However,
+    ///   algorithms that need to extend the ray with additional data must use
+    ///   the rayID component of the ray to identify the original ray to access
+    ///   the per-ray data.
+    ///
+    /// # Thread safety
+    ///
+    /// Embree may invoke this callback from multiple threads concurrently, for
+    /// example during a parallel [`Scene::commit`](crate::Scene::commit),
+    /// or when ray queries are issued from several threads on a shared
+    /// scene. The closure must therefore be safe to call from several
+    /// threads at once and to share across them: it must not depend
+    /// on exclusive `&mut` access to its captures, and everything it captures
+    /// must be `Send + Sync`. The `Fn + Send + Sync` bounds on the closure
+    /// enforce this.
+    pub fn set_intersect_function<F, D, C>(&mut self, intersect: F)
+    where
+        D: UserData,
+        C: AsIntersectContext,
+        F: for<'a> Fn(RayHitN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
+            + Send
+            + Sync
+            + 'static,
+    {
+        match self.shared.kind {
+            GeometryKind::USER => unsafe {
+                let erased = ErasedFn::new(intersect);
+                rtcSetGeometryIntersectFunction(
+                    self.shared.handle,
+                    intersect_function::<F, D, C>(),
+                );
+                self.shared.data.callbacks.lock().unwrap().user_intersect = Some(erased);
+            },
+            // Intersect functions apply only to user geometry; ignored otherwise.
+            _ => {}
+        }
+    }
+
+    /// Unsets the callback to intersect user-defined geometry.
+    pub fn unset_intersect_function(&mut self) {
+        match self.shared.kind {
+            GeometryKind::USER => unsafe {
+                rtcSetGeometryIntersectFunction(self.shared.handle, None);
+                self.shared.data.callbacks.lock().unwrap().user_intersect = None;
+            },
+            // Intersect functions apply only to user geometry; ignored otherwise.
+            _ => {}
+        }
+    }
+
+    /// Sets the callback function to occlude a user geometry.
+    ///
+    /// Similar to [`GeometryBuilder::set_intersect_function`], but for
+    /// occlusion queries.
+    ///
+    /// # Arguments
+    ///
+    /// - `occluded`: The callback function to register, which is invoked by
+    ///   occlusion queries to test whether the rays of a packet of variable
+    ///   size are occluded by a user-defined primitive.  The callback function
+    ///   gets passed a number of arguments:
+    ///
+    ///   - the ray packet of variable size N (see [`RayN`])
+    ///   - the valid masks for each ray in the packet (see [`ValidityN`])
+    ///   - a mutable reference to the intersection context (see
+    ///     [`IntersectContext`](`crate::IntersectContext`) and
+    ///     [`IntersectContextExt`](`crate::IntersectContextExt`))
+    ///   - the geometry ID of the geometry to intersect
+    ///   - the primitive ID of the primitive to intersect
+    ///   - a shared reference to the user data of the geometry (if any); the
+    ///     user data can be set using [`GeometryBuilder::set_user_data`]
+    ///
+    /// # Thread safety
+    ///
+    /// Embree may invoke this callback from multiple threads concurrently, for
+    /// example during a parallel [`Scene::commit`](crate::Scene::commit),
+    /// or when ray queries are issued from several threads on a shared
+    /// scene. The closure must therefore be safe to call from several
+    /// threads at once and to share across them: it must not depend
+    /// on exclusive `&mut` access to its captures, and everything it captures
+    /// must be `Send + Sync`. The `Fn + Send + Sync` bounds on the closure
+    /// enforce this.
+    pub fn set_occluded_function<F, D, C>(&mut self, occluded: F)
+    where
+        D: UserData,
+        C: AsIntersectContext,
+        F: for<'a> Fn(RayN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
+            + Send
+            + Sync
+            + 'static,
+    {
+        match self.shared.kind {
+            GeometryKind::USER => {
+                let erased = ErasedFn::new(occluded);
+                unsafe {
+                    rtcSetGeometryOccludedFunction(
+                        self.shared.handle,
+                        occluded_function::<F, D, C>(),
+                    )
+                };
+                self.shared.data.callbacks.lock().unwrap().user_occluded = Some(erased);
+            }
+            // Occluded functions apply only to user geometry; ignored otherwise.
+            _ => {}
+        }
+    }
+
+    /// Unsets the callback to occlude user-defined geometry.
+    pub fn unset_occluded_function(&mut self) {
+        match self.shared.kind {
+            GeometryKind::USER => unsafe {
+                rtcSetGeometryOccludedFunction(self.shared.handle, None);
+                self.shared.data.callbacks.lock().unwrap().user_occluded = None;
+            },
+            // Occluded functions apply only to user geometry; ignored otherwise.
+            _ => {}
+        }
+    }
+
+    /// Sets the number of primitives of a user-defined geometry.
+    pub fn set_primitive_count(&mut self, count: u32) {
+        match self.shared.kind {
+            GeometryKind::USER => unsafe {
+                rtcSetGeometryUserPrimitiveCount(self.shared.handle, count);
+            },
+            _ => panic!("Only user geometries can have a primitive count!"),
+        }
+    }
+
+    /// Set the subdivision mode for the topology of the specified subdivision
     /// geometry.
     ///
-    /// For triangle meshes, quad meshes, curves, points, and subdivision
-    /// geometries, the number of time steps directly corresponds to the
-    /// number of vertex buffer slots available [`BufferUsage::VERTEX`].
+    /// The subdivision modes can be used to force linear interpolation for
+    /// certain parts of the subdivision mesh:
     ///
-    /// For instance geometries, a transformation must be specified for each
-    /// time step (see [`Geometry::set_transform`]).
+    /// * [`RTCSubdivisionMode::NO_BOUNDARY`]: Boundary patches are ignored.
+    /// This way each rendered patch has a full set of control vertices.
     ///
-    /// For user geometries, the registered bounding callback function must
-    /// provide a bounding box per primitive and time step, and the
-    /// intersection and occlusion callback functions should properly
-    /// intersect the motion-blurred geometry at the ray time.
-    pub fn set_time_step_count(&mut self, count: u32) {
-        unsafe {
-            rtcSetGeometryTimeStepCount(self.shared.handle, count);
+    /// * [`RTCSubdivisionMode::SMOOTH_BOUNDARY`]: The sequence of boundary
+    /// control points are used to generate a smooth B-spline boundary curve
+    /// (default mode).
+    ///
+    /// * [`RTCSubdivisionMode::PIN_CORNERS`]: Corner vertices are pinned to
+    /// their location during subdivision.
+    ///
+    /// * [`RTCSubdivisionMode::PIN_BOUNDARY`]: All vertices at the border are
+    /// pinned to their location during subdivision. This way the boundary is
+    /// interpolated linearly. This mode is typically used for texturing to also
+    /// map texels at the border of the texture to the mesh.
+    ///
+    /// * [`RTCSubdivisionMode::PIN_ALL`]: All vertices at the border are pinned
+    /// to their location during subdivision. This way all patches are linearly
+    /// interpolated.
+    pub fn set_subdivision_mode(&mut self, topology_id: u32, mode: SubdivisionMode) {
+        match self.shared.kind {
+            GeometryKind::SUBDIVISION => unsafe {
+                rtcSetGeometrySubdivisionMode(self.shared.handle, topology_id, mode)
+            },
+            _ => panic!("Only subdivision geometries can have a subdivision mode!"),
         }
     }
 
-    /// Sets the time range for a motion blur geometry.
+    /// Sets the number of topologies of a subdivision geometry.
     ///
-    /// The time range is defined relative to the camera shutter interval
-    /// \[0,1\] but it can be arbitrary. Thus the `start` time can be
-    /// smaller, equal, or larger 0, indicating a geometry whose animation
-    /// definition start before, at, or after the camera shutter opens.
-    /// Similar the `end` time can be smaller, equal, or larger than 1,
-    /// indicating a geometry whose animation definition ends after, at, or
-    /// before the camera shutter closes. The `start` time has to be smaller
-    /// or equal to the `end` time.
+    /// The number of topologies of a subdivision geometry must be greater
+    /// or equal to 1.
     ///
-    /// The default time range when this function is not called is the entire
-    /// camera shutter \[0,1\]. For best performance at most one time segment
-    /// of the piece wise linear definition of the motion should fall
-    /// outside the shutter window to the left and to the right. Thus do not
-    /// set the `start` time or `end` time too far outside the
-    /// \[0,1\] interval for best performance.
-    ///
-    /// This time range feature will also allow geometries to appear and
-    /// disappear during the camera shutter time if the specified time range
-    /// is a sub range of \[0,1\].
-    ///
-    /// Please also have a look at the [`Geometry::set_time_step_count`] to
-    /// see how to define the time steps for the specified time range.
-    pub fn set_time_range(&mut self, start: f32, end: f32) {
-        unsafe {
-            rtcSetGeometryTimeRange(self.shared.handle, start, end);
+    /// To use multiple topologies, first the number of topologies must be
+    /// specified, then the individual topologies can be configured using
+    /// [`GeometryBuilder::set_subdivision_mode`] and by setting an index buffer
+    /// ([`BufferUsage::INDEX`]) using the topology ID as the buffer slot.
+    pub fn set_topology_count(&mut self, count: u32) {
+        match self.shared.kind {
+            GeometryKind::SUBDIVISION => unsafe {
+                rtcSetGeometryTopologyCount(self.shared.handle, count);
+            },
+            _ => panic!("Only subdivision geometries can have multiple topologies!"),
         }
-    }
-
-    /// Sets the user-defined data pointer of the geometry.
-    ///
-    /// The user data pointer is intended to be pointing to the application's
-    /// representation of the geometry, and is passed to various callback
-    /// functions.
-    ///
-    /// The application can use this pointer inside the callback functions to
-    /// access its geometry representation.
-    ///
-    /// Note that the user data pointer is shared across all clones of the
-    /// geometry, and the user is responsible for ensuring that the data
-    /// behind the pointer is valid for the lifetime of all geometry clones. To
-    /// avoid dangling pointers, the user can use `set_owned_user_data` to let
-    /// the geometry own the user data, which will be automatically dropped when
-    /// the geometry is destroyed.
-    ///
-    /// # Access from callbacks and thread safety
-    ///
-    /// `D` must be [`Send`] + [`Sync`] (see [`UserData`]). Callbacks
-    /// (filter / intersect / occluded / bounds / displacement) receive the data
-    /// as a shared `Option<&D>` and may run from several threads
-    /// concurrently, so:
-    ///
-    /// - **Read** it freely inside callbacks.
-    /// - To **mutate it from inside a callback**, use `Sync` interior
-    ///   mutability (`Mutex`, `RwLock`, atomics) *within* `D`; a
-    ///   `Cell`/`RefCell` field would make `D: !Sync` and fail to compile.
-    /// - To **mutate it from outside callbacks**, use
-    ///   [`Geometry::get_user_data_mut`], which is gated by `&mut self` (so it
-    ///   cannot overlap a traversal) and needs no interior mutability.
-    pub fn set_user_data<'a: 'buf, D>(&'buf mut self, user_data: &'a mut D)
-    where
-        D: UserData,
-    {
-        *self.shared.data.user_data.lock().unwrap() = Some(UserDataSlot {
-            data: user_data as *mut D as *mut std::os::raw::c_void,
-            type_id: TypeId::of::<D>(),
-            owner: None,
-        });
-    }
-
-    /// Sets the user-defined data of the geometry and let the geometry own it.
-    ///
-    /// The user data is the application's representation of the geometry and is
-    /// passed to the various callback functions. Unlike
-    /// [`Geometry::set_user_data`], the geometry owns `user_data`: there is
-    /// no dangling-pointer risk, and it is dropped when the last
-    /// clone of the geometry is dropped.
-    ///
-    /// The same callback-access and thread-safety contract as
-    /// [`Geometry::set_user_data`] applies (`D: Send + Sync`; callbacks
-    /// receive a shared `&D`; mutate via interior mutability inside a
-    /// callback, or [`Geometry::get_user_data_mut`] outside).
-    pub fn set_owned_user_data<D>(&mut self, user_data: D)
-    where
-        D: UserData,
-    {
-        let raw: *mut D = Box::into_raw(Box::new(user_data));
-        let owner: Box<dyn Any + Send + Sync> = unsafe { Box::from_raw(raw) };
-
-        // Replacing the Option drops any previous owner, freeing old owned data once.
-        *self.shared.data.user_data.lock().unwrap() = Some(UserDataSlot {
-            data: raw as *mut D as *mut std::os::raw::c_void,
-            type_id: TypeId::of::<D>(),
-            owner: Some(owner),
-        });
-        // No rtcSetGeometryUserData call: the pointer set in `new` already
-        // points at this `GeometryData` control block and never changes.
-    }
-
-    /// Returns a shared reference to the geometry's user data, if one is set
-    /// and it has type `D`.
-    ///
-    /// # Aliasing contract
-    ///
-    /// The returned reference borrows `self`. The same user data is also handed
-    /// to Embree callbacks (filter / intersect / occluded / bounds) during
-    /// [`Scene::commit`](crate::Scene::commit) and the `intersect` / `occluded`
-    /// / `point_query` calls. Embree requires geometry modification and
-    /// traversal never to overlap, so do not hold a reference obtained here
-    /// across such a call, and do not access the same geometry's data
-    /// through a [`Clone`] of this handle at the same time. (The data lives
-    /// behind a shared `Arc`, so the borrow checker cannot enforce this
-    /// across clones — it is the caller's contract, matching Embree's
-    /// threading model.)
-    pub fn get_user_data<D>(&self) -> Option<&D>
-    where
-        D: UserData,
-    {
-        // Validate and copy the pointer out from under the lock, then form a reference
-        // tied to `&self` (the user data outlives the geometry's borrow).
-        let ptr: *const D = {
-            let user_data = self.shared.data.user_data.lock().unwrap();
-            match user_data.as_ref() {
-                Some(ud) if !ud.data.is_null() && ud.type_id == TypeId::of::<D>() => {
-                    ud.data as *const D
-                }
-                _ => return None,
-            }
-        };
-        // SAFETY: `ptr` points at a live `D` of the checked type; the shared borrow of
-        // `self` rules out `&mut` aliases through this handle. See the aliasing
-        // contract.
-        Some(unsafe { &*ptr })
     }
 
     /// Returns a mutable reference to the geometry's user data, if one is set
@@ -1014,8 +1255,8 @@ impl<'buf> Geometry<'buf> {
     /// aliasing contract as [`Geometry::get_user_data`] applies.
     ///
     /// This is the way to mutate user data **outside** of callbacks; inside a
-    /// callback the data is shared as `&D` (see [`Geometry::set_user_data`]
-    /// for mutating it there).
+    /// callback the data is shared as `&D` (see
+    /// [`GeometryBuilder::set_user_data`] for mutating it there).
     pub fn get_user_data_mut<D>(&mut self) -> Option<&mut D>
     where
         D: UserData,
@@ -1049,31 +1290,6 @@ impl<'buf> Geometry<'buf> {
         }
     }
 
-    /// Sets the number of vertex attributes of the geometry.
-    ///
-    /// This function sets the number of slots for vertex attributes buffers
-    /// (BufferUsage::VERTEX_ATTRIBUTE) that can be used for the specified
-    /// geometry.
-    ///
-    /// Only supported by triangle meshes, quad meshes, curves, points, and
-    /// subdivision geometries.
-    ///
-    /// # Arguments
-    ///
-    /// * `count` - The number of vertex attribute slots.
-    pub fn set_vertex_attribute_count(&mut self, count: u32) {
-        match self.shared.kind {
-            // Vertex attributes are not supported by these kinds; no-op.
-            GeometryKind::GRID | GeometryKind::USER | GeometryKind::INSTANCE => {}
-            _ => {
-                // Update the vertex attribute count.
-                unsafe {
-                    rtcSetGeometryVertexAttributeCount(self.shared.handle, count);
-                }
-            }
-        }
-    }
-
     /// Binds a vertex attribute to a topology of the geometry.
     ///
     /// This function binds a vertex attribute buffer slot to a topology for the
@@ -1084,13 +1300,13 @@ impl<'buf> Geometry<'buf> {
     /// calls.
     ///
     /// A topology with ID `i` consists of a subdivision mode set through
-    /// `Geometry::set_subdivision_mode` and the index buffer bound to the index
-    /// buffer slot `i`. This index buffer can assign indices for each face of
-    /// the subdivision geometry that are different to the indices of the
-    /// default topology. These new indices can for example be used to
-    /// introduce additional borders into the subdivision mesh to map
-    /// multiple textures onto one subdivision geometry.
-    pub fn set_vertex_attribute_topology(&self, vertex_attribute_id: u32, topology_id: u32) {
+    /// `GeometryBuilder::set_subdivision_mode` and the index buffer bound to
+    /// the index buffer slot `i`. This index buffer can assign indices for
+    /// each face of the subdivision geometry that are different to the
+    /// indices of the default topology. These new indices can for example
+    /// be used to introduce additional borders into the subdivision mesh to
+    /// map multiple textures onto one subdivision geometry.
+    pub fn set_vertex_attribute_topology(&mut self, vertex_attribute_id: u32, topology_id: u32) {
         unsafe {
             rtcSetGeometryVertexAttributeTopology(
                 self.shared.handle,
@@ -1098,6 +1314,319 @@ impl<'buf> Geometry<'buf> {
                 topology_id,
             );
         }
+    }
+
+    /// Sets the displacement function for a subdivision geometry.
+    ///
+    /// Only one displacement function can be set per geometry, further calls to
+    /// this will overwrite the previous displacement function. Use
+    /// [`GeometryBuilder::unset_displacement_function`] to remove the
+    /// displacement function.
+    ///
+    /// The registered function is invoked to displace points on the subdivision
+    /// geometry during spatial acceleration structure construction,
+    /// during the [`Scene::commit`] call.
+    ///
+    /// # Arguments
+    ///
+    /// * `displacement`: The displacement function. The displacement function
+    ///   is called for each vertex of the subdivision geometry.
+    ///
+    ///   The function is called with the following parameters:
+    ///
+    ///   * `geometry`: The raw geometry handle [`sys::RTCGeometry`].
+    ///   * `vertices`: The information about the vertices to displace. See
+    ///     [`Vertices`].
+    ///   * `prim_id`: The ID of the primitive that contains the vertices to
+    ///     displace.
+    ///   * `time_step`: The time step for which the displacement function is
+    ///     evaluated. Important for time dependent displacement and motion
+    ///     blur.
+    ///   * `user_data`: The geometry user data. See
+    ///     [`GeometryBuilder::set_user_data`].
+    ///
+    /// # Safety
+    ///
+    /// The callback function provided to this function contains a raw pointer
+    /// to Embree geometry.
+    ///
+    /// # Thread safety
+    ///
+    /// Embree may invoke this callback from multiple threads concurrently
+    /// during a parallel [`Scene::commit`](crate::Scene::commit). The
+    /// closure must therefore be safe to call from several threads at once
+    /// and to share across them: it must not depend on exclusive `&mut`
+    /// access to its captures, and everything it captures must be `Send +
+    /// Sync`. The `Fn + Send + Sync` bounds on the closure enforce this.
+    pub unsafe fn set_displacement_function<F, D>(&mut self, displacement: F)
+    where
+        D: UserData,
+        F: for<'a> Fn(RTCGeometry, Vertices<'a>, u32, u32, Option<&D>) + Send + Sync + 'static,
+    {
+        match self.shared.kind {
+            GeometryKind::SUBDIVISION => {
+                let erased = ErasedFn::new(displacement);
+                unsafe {
+                    rtcSetGeometryDisplacementFunction(
+                        self.shared.handle,
+                        displacement_function::<F, D>(),
+                    )
+                }
+                self.shared.data.callbacks.lock().unwrap().displacement = Some(erased);
+            }
+            // Displacement functions apply only to subdivision geometry; ignored
+            // otherwise.
+            _ => {}
+        }
+    }
+
+    /// Removes the displacement function for a subdivision geometry.
+    pub fn unset_displacement_function(&mut self) {
+        match self.shared.kind {
+            GeometryKind::SUBDIVISION => unsafe {
+                rtcSetGeometryDisplacementFunction(self.shared.handle, None);
+                self.shared.data.callbacks.lock().unwrap().displacement = None;
+            },
+            _ => panic!("Only subdivision geometries can have displacement functions!"),
+        }
+    }
+
+    /// Sets the instanced scene of an instance geometry.
+    pub fn set_instanced_scene(&mut self, scene: &Scene) {
+        match self.shared.kind {
+            GeometryKind::INSTANCE => unsafe {
+                rtcSetGeometryInstancedScene(self.shared.handle, scene.handle)
+            },
+            _ => panic!("Only instance geometries can have instanced scenes!"),
+        }
+    }
+
+    /// Sets the transformation for a particular time step of an instance
+    /// geometry.
+    ///
+    /// The transformation is specified as a 4x4 column-major matrix.
+    pub fn set_transform(&mut self, time_step: u32, transform: &[f32; 16]) {
+        match self.shared.kind {
+            GeometryKind::INSTANCE => unsafe {
+                rtcSetGeometryTransform(
+                    self.shared.handle,
+                    time_step,
+                    Format::FLOAT4X4_COLUMN_MAJOR,
+                    transform.as_ptr() as *const _,
+                );
+            },
+            _ => panic!("Only instance geometries can have instanced scenes!"),
+        }
+    }
+
+    /// Sets the transformation for a particular time step of an instance
+    /// geometry as a decomposition of the transformation matrix using
+    /// quaternions to represent the rotation.
+    pub fn set_transform_quaternion(
+        &mut self,
+        time_step: u32,
+        transform: &QuaternionDecomposition,
+    ) {
+        match self.shared.kind {
+            GeometryKind::INSTANCE => unsafe {
+                rtcSetGeometryTransformQuaternion(
+                    self.shared.handle,
+                    time_step,
+                    transform as &QuaternionDecomposition as *const _,
+                );
+            },
+            _ => panic!("Only instance geometries can have instanced scenes!"),
+        }
+    }
+
+    /// Checks if the vertex attribute is allowed for the geometry.
+    ///
+    /// This function do not check if the slot of the vertex attribute.
+    fn check_vertex_attribute(&self) -> Result<(), Error> {
+        match self.shared.kind {
+            GeometryKind::GRID | GeometryKind::USER | GeometryKind::INSTANCE => {
+                Err(Error::INVALID_OPERATION)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Commits pending changes (`rtcCommitGeometry`) and transitions to the
+    /// committed, shareable [`Geometry`] phase.
+    ///
+    /// Consumes the builder: the geometry can no longer be mutated unless you
+    /// later regain a builder via [`Geometry::try_edit`]. The returned
+    /// [`Geometry`] can be attached to scenes
+    /// ([`Scene::attach_geometry`](crate::Scene::attach_geometry))
+    /// and shared across threads for concurrent ray queries.
+    pub fn commit(self) -> Geometry<'buf> {
+        unsafe {
+            rtcCommitGeometry(self.shared.handle);
+        }
+        Geometry {
+            shared: self.shared,
+        }
+    }
+}
+
+/// The **committed, shareable phase** of an Embree geometry.
+///
+/// Obtained from [`GeometryBuilder::commit`] (see [`GeometryBuilder`] for the
+/// build phase). A committed geometry is read-only and `Send + Sync + Clone`,
+/// so it can be attached to one or more scenes
+/// ([`Scene::attach_geometry`](crate::Scene::attach_geometry) /
+/// [`Scene::attach_geometry_by_id`](crate::Scene::attach_geometry_by_id)) and
+/// shared across threads for concurrent ray queries which matches embree's rule
+/// that ray queries are thread-safe as long as nothing is modifying the
+/// geometry.
+///
+/// Only read-only operations live here ([`interpolate`](Geometry::interpolate),
+/// [`get_buffer`](Geometry::get_buffer),
+/// [`get_user_data`](Geometry::get_user_data), the half-edge topology queries,
+/// …). Every mutator lives on [`GeometryBuilder`].
+///
+/// To modify a geometry again, regain a [`GeometryBuilder`] with
+/// [`try_edit`](Geometry::try_edit), which succeeds only when you are the
+/// **sole owner**, so a geometry attached to any scene cannot be edited until
+/// it is detached everywhere. For the common render-loop toggles
+/// (enable/disable, mark a buffer dirty) *without* detaching, use
+/// [`Scene::enable_geometry`](crate::Scene::enable_geometry) /
+/// [`Scene::disable_geometry`](crate::Scene::disable_geometry) /
+/// [`Scene::update_geometry_buffer`](crate::Scene::update_geometry_buffer).
+///
+/// It does not own the host buffers bound to it, but it does own the underlying
+/// embree geometry object (released when the last clone drops).
+#[derive(Debug, Clone)]
+pub struct Geometry<'buf> {
+    pub(crate) shared: Arc<GeometryShared<'buf>>,
+}
+
+unsafe impl<'buf> Send for Geometry<'buf> {}
+unsafe impl<'buf> Sync for Geometry<'buf> {}
+
+impl<'buf> Geometry<'buf> {
+    /// Creates a new geometry in its mutable build phase (a
+    /// [`GeometryBuilder`]). Configure it (buffers, callbacks, …), then
+    /// [`GeometryBuilder::commit`] to a shareable [`Geometry`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use embree::{Device, Geometry, GeometryKind};
+    ///
+    /// let device = Device::new().unwrap();
+    /// let builder = Geometry::new(&device, GeometryKind::TRIANGLE);
+    /// let geometry = builder.commit();
+    /// ```
+    ///
+    /// or use the [`Device::create_geometry`] method:
+    ///
+    /// ```no_run
+    /// use embree::{Device, GeometryKind};
+    ///
+    /// let device = Device::new().unwrap();
+    /// let builder = device.create_geometry(GeometryKind::TRIANGLE).unwrap();
+    /// ```
+    pub fn new<'dev>(device: &'dev Device, kind: GeometryKind) -> GeometryBuilder<'buf> {
+        let handle = unsafe { rtcNewGeometry(device.handle, kind) };
+        let shared = Arc::new(GeometryShared {
+            device: device.clone(),
+            handle,
+            kind,
+            attachments: Mutex::new(HashMap::new()),
+            data: GeometryData::default(),
+        });
+        unsafe {
+            rtcSetGeometryUserData(handle, Arc::as_ptr(&shared) as *mut _);
+        }
+        GeometryBuilder { shared }
+    }
+
+    /// Regains the unique mutable [`GeometryBuilder`] to edit this geometry.
+    ///
+    /// Succeeds only if this is the **sole owner** (not attached to any scene,
+    /// no other clone). Returns `Err(self)` if it is shared.
+    ///
+    /// To fully edit an attached geometry: detach it from every scene first,
+    /// then `try_edit`. For cheap dynamic toggles (visibility /
+    /// buffer-dirty) on an attached geometry, prefer the
+    /// `Scene::{enable,disable}_geometry` / `update_geometry_buffer`
+    /// methods, which need no detach.
+    ///
+    /// # Soundness contract
+    ///
+    /// Exclusivity is tracked via the `Arc` strong count, i.e. **wrapper
+    /// clones**. This is sound because all safe sharing goes through
+    /// wrapper clones (including
+    /// [`Scene::attach_geometry`](crate::Scene::attach_geometry), which retains
+    /// one). Raw [`Geometry::handle`] escapes are outside this guarantee.
+    pub fn try_edit(mut self) -> Result<GeometryBuilder<'buf>, Geometry<'buf>> {
+        if Arc::get_mut(&mut self.shared).is_some() {
+            Ok(GeometryBuilder {
+                shared: self.shared,
+            })
+        } else {
+            Err(self)
+        }
+    }
+
+    /// Returns the raw Embree geometry handle.
+    ///
+    /// # Safety
+    ///
+    /// Use this function only if you know what you are doing. The returned
+    /// handle is a raw pointer to an Embree reference-counted object. The
+    /// reference count is not increased by this function, so the caller must
+    /// ensure that the handle is not used after the geometry object is
+    /// destroyed.
+    pub unsafe fn handle(&self) -> RTCGeometry { self.shared.handle }
+
+    /// Returns the buffer bound to the given slot and usage.
+    pub fn get_buffer(&self, usage: BufferUsage, slot: u32) -> Option<BufferSlice<'_>> {
+        let attachments = self.shared.attachments.lock().unwrap();
+        attachments
+            .get(&usage)
+            .and_then(|v| v.iter().find(|a| a.slot == slot))
+            .map(|a| a.source)
+    }
+
+    /// Returns the type of geometry of this geometry.
+    pub fn kind(&self) -> GeometryKind { self.shared.kind }
+
+    /// Returns a shared reference to the geometry's user data, if one is set
+    /// and it has type `D`.
+    ///
+    /// # Aliasing contract
+    ///
+    /// The returned reference borrows `self`. The same user data is also handed
+    /// to Embree callbacks (filter / intersect / occluded / bounds) during
+    /// [`Scene::commit`](crate::Scene::commit) and the `intersect` / `occluded`
+    /// / `point_query` calls. Embree requires geometry modification and
+    /// traversal never to overlap, so do not hold a reference obtained here
+    /// across such a call, and do not access the same geometry's data
+    /// through a [`Clone`] of this handle at the same time. (The data lives
+    /// behind a shared `Arc`, so the borrow checker cannot enforce this
+    /// across clones, it is the caller's contract, matching Embree's
+    /// threading model.)
+    pub fn get_user_data<D>(&self) -> Option<&D>
+    where
+        D: UserData,
+    {
+        // Validate and copy the pointer out from under the lock, then form a reference
+        // tied to `&self` (the user data outlives the geometry's borrow).
+        let ptr: *const D = {
+            let user_data = self.shared.data.user_data.lock().unwrap();
+            match user_data.as_ref() {
+                Some(ud) if !ud.data.is_null() && ud.type_id == TypeId::of::<D>() => {
+                    ud.data as *const D
+                }
+                _ => return None,
+            }
+        };
+        // SAFETY: `ptr` points at a live `D` of the checked type; the shared borrow of
+        // `self` rules out `&mut` aliases through this handle. See the aliasing
+        // contract.
+        Some(unsafe { &*ptr })
     }
 
     /// Smoothly interpolates per-vertex data over the geometry.
@@ -1215,330 +1744,6 @@ impl<'buf> Geometry<'buf> {
         }
     }
 
-    /// Sets a callback to query the bounding box of user-defined primitives.
-    ///
-    /// Only a single callback function can be registered per geometry, and
-    /// further invocations overwrite the previously set callback function.
-    ///
-    /// Unregister the callback function by calling
-    /// [`Geometry::unset_bounds_function`].
-    ///
-    /// The registered bounding box callback function is invoked to calculate
-    /// axis- aligned bounding boxes of the primitives of the user-defined
-    /// geometry during spatial acceleration structure construction.
-    ///
-    /// The arguments of the callback closure are:
-    ///
-    /// - a shared reference to the user data of the geometry
-    ///
-    /// - the ID of the primitive to calculate the bounds for
-    ///
-    /// - the time step at which to calculate the bounds
-    ///
-    /// - a mutable reference to the bounding box where the result should be
-    ///   written to
-    ///
-    /// In a typical usage scenario one would store a pointer to the internal
-    /// representation of the user geometry object using
-    /// [`Geometry::set_user_data`]. The callback function can then read
-    /// that pointer from the `geometryUserPtr` field and calculate the
-    /// proper bounding box for the requested primitive and time, and store
-    /// that bounding box to the destination structure (`bounds_o` member).
-    ///
-    /// # Thread safety
-    ///
-    /// Embree may invoke this callback from multiple threads concurrently — for
-    /// example during a parallel [`Scene::commit`](crate::Scene::commit),
-    /// or when ray queries are issued from several threads on a shared
-    /// scene. The closure must therefore be safe to call from several
-    /// threads at once and to share across them: it must not depend
-    /// on exclusive `&mut` access to its captures, and everything it captures
-    /// must be `Send + Sync`. The `Fn + Send + Sync` bounds on the closure
-    /// enforce this.
-    pub fn set_bounds_function<F, D>(&mut self, bounds: F)
-    where
-        D: UserData,
-        F: Fn(&mut Bounds, u32, u32, Option<&D>) + Send + Sync + 'static,
-    {
-        match self.shared.kind {
-            GeometryKind::USER => unsafe {
-                let erased = ErasedFn::new(bounds);
-                rtcSetGeometryBoundsFunction(
-                    self.shared.handle,
-                    bounds_function::<F, D>(),
-                    ptr::null_mut(),
-                );
-                self.shared.data.callbacks.lock().unwrap().user_bounds = Some(erased);
-            },
-            // Bounds functions apply only to user geometry; ignored otherwise.
-            _ => {}
-        }
-    }
-
-    /// Unsets the callback to calculate the bounding box of user-defined
-    /// geometry.
-    pub fn unset_bounds_function(&mut self) {
-        match self.shared.kind {
-            GeometryKind::USER => unsafe {
-                rtcSetGeometryBoundsFunction(self.shared.handle, None, ptr::null_mut());
-                self.shared.data.callbacks.lock().unwrap().user_bounds = None;
-            },
-            _ => panic!("Only user geometries can have a bounds function!"),
-        }
-    }
-
-    /// Sets the callback function to intersect a user geometry.
-    ///
-    /// The registered
-    ///   callback function is invoked by intersect-type ray queries to
-    ///   calculate the intersection of a ray packet of variable size with one
-    ///   user-defined primitive.
-    /// Only a single callback function can be registered per geometry and
-    /// further invocations overwrite the previously set callback function.
-    /// Unregister the callback function by calling
-    /// [`Geometry::unset_intersect_function`].
-    ///
-    ///
-    /// # Arguments
-    ///
-    /// - `intersect`: The callback function to register. The task of the
-    ///   callback function is to intersect each active ray from the ray packet
-    ///   with the specified user primitive. If the user-defined primitive is
-    ///   missed by a ray of the ray packet, the function should return without
-    ///   modifying the ray or hit. If an intersection of the user-defined
-    ///   primitive with the ray is found in the range `tnear` to `tfar`, it
-    ///   should update the hit distance of the ray (`tfar` member) and the
-    ///   hit(`u`, `v`, `instID`, `geomID`, `primID` members). In particular,
-    ///   the currently intersected instance is stored in the `instID` field of
-    ///   the intersection context, which must be deep-copied into the `instID`
-    ///   member of the hit structure.
-    ///
-    ///   The callback function gets passed a number of arguments:
-    ///     - the ray hit packet of variable size N (see [`RayHitN`]); it
-    ///       contains valid data, in particular the `tfar` value is the current
-    ///       closest hit distance found. All data inside the `hit` component of
-    ///       the ray hit structure are undefined and should **NOT** be read by
-    ///       the function.
-    ///     - the valid masks for each ray in the packet (see [`ValidityN`])
-    ///     - a mutable reference to the intersection context (see
-    ///       [`IntersectContext`](`crate::IntersectContext`) and
-    ///       [`IntersectContextExt`](`crate::IntersectContextExt`))
-    ///     - the geometry ID of the geometry to intersect
-    ///     - the primitive ID of the primitive to intersect
-    ///     - a shared reference to the user data of the geometry (if any); the
-    ///       user data can be set using [`Geometry::set_user_data`]
-    ///
-    /// The ray component of the ray hit structure contains valid data, in
-    /// particular the tfar value is the current closest hit distance found.
-    /// All data inside the hit component of the [`RayHitN`] structure are
-    /// undefined and should **NOT** be *read* by the function (writing is ok).
-    ///
-    /// As a primitive might have multiple intersections with a ray, the
-    /// intersection filter function needs to be invoked by the user
-    /// geometry intersection callback for each encountered intersection, if
-    /// filtering of intersections is desired. This can be achieved through
-    /// the [`Geometry::set_intersect_filter_function`].
-    ///
-    /// - Within the user geometry intersect function, it is safe to trace new
-    ///   rays and create new scenes and geometries.
-    ///
-    /// - When performing ray queries using [`Scene::intersect`], it is
-    ///   guaranteed that the packet size is 1 when the callback is invoked.
-    ///
-    /// - When performing ray queries using the
-    ///   [`Scene::intersect4`]/[`Scene::intersect8`]/[`Scene::intersect16`]
-    ///   functions, it is **not** generally guaranteed that the ray packet size
-    ///   (and order of rays inside the packet) passed to the callback matches
-    ///   the initial ray packet. However, under some circumstances these
-    ///   properties are guaranteed, and whether this is the case can be queried
-    ///   using [`Device::get_property`].
-    ///
-    /// - When performing ray queries using the stream API such as
-    ///   [`Scene::intersect_stream_soa`], [`Scene::intersect_stream_aos`], the
-    ///   order of rays and ray packet size of the callback function might
-    ///   change to either 1, 4, 8, or 16.
-    ///
-    /// - For many usage scenarios, repacking and re-ordering of rays does not
-    ///   cause difficulties in implementing the callback function. However,
-    ///   algorithms that need to extend the ray with additional data must use
-    ///   the rayID component of the ray to identify the original ray to access
-    ///   the per-ray data.
-    ///
-    /// # Thread safety
-    ///
-    /// Embree may invoke this callback from multiple threads concurrently — for
-    /// example during a parallel [`Scene::commit`](crate::Scene::commit),
-    /// or when ray queries are issued from several threads on a shared
-    /// scene. The closure must therefore be safe to call from several
-    /// threads at once and to share across them: it must not depend
-    /// on exclusive `&mut` access to its captures, and everything it captures
-    /// must be `Send + Sync`. The `Fn + Send + Sync` bounds on the closure
-    /// enforce this.
-    pub fn set_intersect_function<F, D, C>(&mut self, intersect: F)
-    where
-        D: UserData,
-        C: AsIntersectContext,
-        F: for<'a> Fn(RayHitN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
-            + Send
-            + Sync
-            + 'static,
-    {
-        match self.shared.kind {
-            GeometryKind::USER => unsafe {
-                let erased = ErasedFn::new(intersect);
-                rtcSetGeometryIntersectFunction(
-                    self.shared.handle,
-                    intersect_function::<F, D, C>(),
-                );
-                self.shared.data.callbacks.lock().unwrap().user_intersect = Some(erased);
-            },
-            // Intersect functions apply only to user geometry; ignored otherwise.
-            _ => {}
-        }
-    }
-
-    /// Unsets the callback to intersect user-defined geometry.
-    pub fn unset_intersect_function(&mut self) {
-        match self.shared.kind {
-            GeometryKind::USER => unsafe {
-                rtcSetGeometryIntersectFunction(self.shared.handle, None);
-                self.shared.data.callbacks.lock().unwrap().user_intersect = None;
-            },
-            // Intersect functions apply only to user geometry; ignored otherwise.
-            _ => {}
-        }
-    }
-
-    /// Sets the callback function to occlude a user geometry.
-    ///
-    /// Similar to [`Geometry::set_intersect_function`], but for occlusion
-    /// queries.
-    ///
-    /// # Arguments
-    ///
-    /// - `occluded`: The callback function to register, which is invoked by
-    ///   occlusion queries to test whether the rays of a packet of variable
-    ///   size are occluded by a user-defined primitive.  The callback function
-    ///   gets passed a number of arguments:
-    ///
-    ///   - the ray packet of variable size N (see [`RayN`])
-    ///   - the valid masks for each ray in the packet (see [`ValidityN`])
-    ///   - a mutable reference to the intersection context (see
-    ///     [`IntersectContext`](`crate::IntersectContext`) and
-    ///     [`IntersectContextExt`](`crate::IntersectContextExt`))
-    ///   - the geometry ID of the geometry to intersect
-    ///   - the primitive ID of the primitive to intersect
-    ///   - a shared reference to the user data of the geometry (if any); the
-    ///     user data can be set using [`Geometry::set_user_data`]
-    ///
-    /// # Thread safety
-    ///
-    /// Embree may invoke this callback from multiple threads concurrently — for
-    /// example during a parallel [`Scene::commit`](crate::Scene::commit),
-    /// or when ray queries are issued from several threads on a shared
-    /// scene. The closure must therefore be safe to call from several
-    /// threads at once and to share across them: it must not depend
-    /// on exclusive `&mut` access to its captures, and everything it captures
-    /// must be `Send + Sync`. The `Fn + Send + Sync` bounds on the closure
-    /// enforce this.
-    pub fn set_occluded_function<F, D, C>(&mut self, occluded: F)
-    where
-        D: UserData,
-        C: AsIntersectContext,
-        F: for<'a> Fn(RayN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
-            + Send
-            + Sync
-            + 'static,
-    {
-        match self.shared.kind {
-            GeometryKind::USER => {
-                let erased = ErasedFn::new(occluded);
-                unsafe {
-                    rtcSetGeometryOccludedFunction(
-                        self.shared.handle,
-                        occluded_function::<F, D, C>(),
-                    )
-                };
-                self.shared.data.callbacks.lock().unwrap().user_occluded = Some(erased);
-            }
-            // Occluded functions apply only to user geometry; ignored otherwise.
-            _ => {}
-        }
-    }
-
-    /// Unsets the callback to occlude user-defined geometry.
-    pub fn unset_occluded_function(&mut self) {
-        match self.shared.kind {
-            GeometryKind::USER => unsafe {
-                rtcSetGeometryOccludedFunction(self.shared.handle, None);
-                self.shared.data.callbacks.lock().unwrap().user_occluded = None;
-            },
-            // Occluded functions apply only to user geometry; ignored otherwise.
-            _ => {}
-        }
-    }
-
-    /// Sets the number of primitives of a user-defined geometry.
-    pub fn set_primitive_count(&mut self, count: u32) {
-        match self.shared.kind {
-            GeometryKind::USER => unsafe {
-                rtcSetGeometryUserPrimitiveCount(self.shared.handle, count);
-            },
-            _ => panic!("Only user geometries can have a primitive count!"),
-        }
-    }
-
-    /// Set the subdivision mode for the topology of the specified subdivision
-    /// geometry.
-    ///
-    /// The subdivision modes can be used to force linear interpolation for
-    /// certain parts of the subdivision mesh:
-    ///
-    /// * [`RTCSubdivisionMode::NO_BOUNDARY`]: Boundary patches are ignored.
-    /// This way each rendered patch has a full set of control vertices.
-    ///
-    /// * [`RTCSubdivisionMode::SMOOTH_BOUNDARY`]: The sequence of boundary
-    /// control points are used to generate a smooth B-spline boundary curve
-    /// (default mode).
-    ///
-    /// * [`RTCSubdivisionMode::PIN_CORNERS`]: Corner vertices are pinned to
-    /// their location during subdivision.
-    ///
-    /// * [`RTCSubdivisionMode::PIN_BOUNDARY`]: All vertices at the border are
-    /// pinned to their location during subdivision. This way the boundary is
-    /// interpolated linearly. This mode is typically used for texturing to also
-    /// map texels at the border of the texture to the mesh.
-    ///
-    /// * [`RTCSubdivisionMode::PIN_ALL`]: All vertices at the border are pinned
-    /// to their location during subdivision. This way all patches are linearly
-    /// interpolated.
-    pub fn set_subdivision_mode(&self, topology_id: u32, mode: SubdivisionMode) {
-        match self.shared.kind {
-            GeometryKind::SUBDIVISION => unsafe {
-                rtcSetGeometrySubdivisionMode(self.shared.handle, topology_id, mode)
-            },
-            _ => panic!("Only subdivision geometries can have a subdivision mode!"),
-        }
-    }
-
-    /// Sets the number of topologies of a subdivision geometry.
-    ///
-    /// The number of topologies of a subdivision geometry must be greater
-    /// or equal to 1.
-    ///
-    /// To use multiple topologies, first the number of topologies must be
-    /// specified, then the individual topologies can be configured using
-    /// [`Geometry::set_subdivision_mode`] and by setting an index buffer
-    /// ([`BufferUsage::INDEX`]) using the topology ID as the buffer slot.
-    pub fn set_topology_count(&mut self, count: u32) {
-        match self.shared.kind {
-            GeometryKind::SUBDIVISION => unsafe {
-                rtcSetGeometryTopologyCount(self.shared.handle, count);
-            },
-            _ => panic!("Only subdivision geometries can have multiple topologies!"),
-        }
-    }
-
     /// Returns the first half edge of a face.
     ///
     /// This function can only be used for subdivision meshes. As all topologies
@@ -1601,91 +1806,6 @@ impl<'buf> Geometry<'buf> {
         }
     }
 
-    /// Sets the displacement function for a subdivision geometry.
-    ///
-    /// Only one displacement function can be set per geometry, further calls to
-    /// this will overwrite the previous displacement function. Use
-    /// [`Geometry::unset_displacement_function`] to remove the displacement
-    /// function.
-    ///
-    /// The registered function is invoked to displace points on the subdivision
-    /// geometry during spatial acceleration structure construction,
-    /// during the [`Scene::commit`] call.
-    ///
-    /// # Arguments
-    ///
-    /// * `displacement`: The displacement function. The displacement function
-    ///   is called for each vertex of the subdivision geometry.
-    ///
-    ///   The function is called with the following parameters:
-    ///
-    ///   * `geometry`: The raw geometry handle [`sys::RTCGeometry`].
-    ///   * `vertices`: The information about the vertices to displace. See
-    ///     [`Vertices`].
-    ///   * `prim_id`: The ID of the primitive that contains the vertices to
-    ///     displace.
-    ///   * `time_step`: The time step for which the displacement function is
-    ///     evaluated. Important for time dependent displacement and motion
-    ///     blur.
-    ///   * `user_data`: The geometry user data. See
-    ///     [`Geometry::set_user_data`].
-    ///
-    /// # Safety
-    ///
-    /// The callback function provided to this function contains a raw pointer
-    /// to Embree geometry.
-    ///
-    /// # Thread safety
-    ///
-    /// Embree may invoke this callback from multiple threads concurrently
-    /// during a parallel [`Scene::commit`](crate::Scene::commit). The
-    /// closure must therefore be safe to call from several threads at once
-    /// and to share across them: it must not depend on exclusive `&mut`
-    /// access to its captures, and everything it captures must be `Send +
-    /// Sync`. The `Fn + Send + Sync` bounds on the closure enforce this.
-    pub unsafe fn set_displacement_function<F, D>(&mut self, displacement: F)
-    where
-        D: UserData,
-        F: for<'a> Fn(RTCGeometry, Vertices<'a>, u32, u32, Option<&D>) + Send + Sync + 'static,
-    {
-        match self.shared.kind {
-            GeometryKind::SUBDIVISION => {
-                let erased = ErasedFn::new(displacement);
-                unsafe {
-                    rtcSetGeometryDisplacementFunction(
-                        self.shared.handle,
-                        displacement_function::<F, D>(),
-                    )
-                }
-                self.shared.data.callbacks.lock().unwrap().displacement = Some(erased);
-            }
-            // Displacement functions apply only to subdivision geometry; ignored
-            // otherwise.
-            _ => {}
-        }
-    }
-
-    /// Removes the displacement function for a subdivision geometry.
-    pub fn unset_displacement_function(&mut self) {
-        match self.shared.kind {
-            GeometryKind::SUBDIVISION => unsafe {
-                rtcSetGeometryDisplacementFunction(self.shared.handle, None);
-                self.shared.data.callbacks.lock().unwrap().displacement = None;
-            },
-            _ => panic!("Only subdivision geometries can have displacement functions!"),
-        }
-    }
-
-    /// Sets the instanced scene of an instance geometry.
-    pub fn set_instanced_scene(&mut self, scene: &Scene) {
-        match self.shared.kind {
-            GeometryKind::INSTANCE => unsafe {
-                rtcSetGeometryInstancedScene(self.shared.handle, scene.handle)
-            },
-            _ => panic!("Only instance geometries can have instanced scenes!"),
-        }
-    }
-
     /// Returns the interpolated instance transformation for the specified time
     /// step.
     ///
@@ -1701,44 +1821,6 @@ impl<'buf> Geometry<'buf> {
                     transform.as_mut_ptr() as *mut _,
                 );
                 transform
-            },
-            _ => panic!("Only instance geometries can have instanced scenes!"),
-        }
-    }
-
-    /// Sets the transformation for a particular time step of an instance
-    /// geometry.
-    ///
-    /// The transformation is specified as a 4x4 column-major matrix.
-    pub fn set_transform(&mut self, time_step: u32, transform: &[f32; 16]) {
-        match self.shared.kind {
-            GeometryKind::INSTANCE => unsafe {
-                rtcSetGeometryTransform(
-                    self.shared.handle,
-                    time_step,
-                    Format::FLOAT4X4_COLUMN_MAJOR,
-                    transform.as_ptr() as *const _,
-                );
-            },
-            _ => panic!("Only instance geometries can have instanced scenes!"),
-        }
-    }
-
-    /// Sets the transformation for a particular time step of an instance
-    /// geometry as a decomposition of the transformation matrix using
-    /// quaternions to represent the rotation.
-    pub fn set_transform_quaternion(
-        &mut self,
-        time_step: u32,
-        transform: &QuaternionDecomposition,
-    ) {
-        match self.shared.kind {
-            GeometryKind::INSTANCE => unsafe {
-                rtcSetGeometryTransformQuaternion(
-                    self.shared.handle,
-                    time_step,
-                    transform as &QuaternionDecomposition as *const _,
-                );
             },
             _ => panic!("Only instance geometries can have instanced scenes!"),
         }
@@ -1931,11 +2013,14 @@ impl InterpolateOutput {
 
 macro_rules! impl_geometry_type {
     ($name:ident, $kind:path, $(#[$meta:meta])*) => {
+        /// Typed [`GeometryBuilder`] for a fixed geometry kind. Build via its
+        /// `Deref`/`DerefMut` to [`GeometryBuilder`], then `commit` to a
+        /// shareable [`Geometry`].
         #[derive(Debug)]
-        pub struct $name<'a>(Geometry<'a>);
+        pub struct $name<'a>(GeometryBuilder<'a>);
 
         impl<'a> Deref for $name<'a> {
-            type Target = Geometry<'a>;
+            type Target = GeometryBuilder<'a>;
 
             fn deref(&self) -> &Self::Target { &self.0 }
         }
@@ -1947,14 +2032,17 @@ macro_rules! impl_geometry_type {
         $(#[$meta])*
         impl<'a> $name<'a> {
             pub fn new(device: &Device) -> Result<Self, Error> {
-                Ok(Self(Geometry::new(device, $kind)?))
+                Ok(Self(Geometry::new(device, $kind)))
             }
+
+            /// Commit pending changes and move to the shareable committed phase.
+            pub fn commit(self) -> Geometry<'a> { self.0.commit() }
         }
     };
 }
 
-impl_geometry_type!(TriangleMesh, GeometryKind::TRIANGLE,
-    /// A triangle mesh geometry.
+impl_geometry_type!(TriangleMeshBuilder, GeometryKind::TRIANGLE,
+    /// A triangle mesh geometry builder.
     ///
     /// The index buffer must contain an array of three 32-bit indices per triangle
     /// ([`Format::UINT3`]), and the number of primitives is inferred from the size
@@ -1978,13 +2066,13 @@ impl_geometry_type!(TriangleMesh, GeometryKind::TRIANGLE,
     /// normal pointing upwards outside the front face.
     ///
     /// For multi-segment motion blur, the number of time steps must be first
-    /// specified using the [`Geometry::set_time_step_count`] call. Then a vertex
+    /// specified using the [`GeometryBuilder::set_time_step_count`] call. Then a vertex
     /// buffer for each time step can be set using different buffer slots, and all
     /// these buffers have to have the same stride and size.
 );
 
-impl_geometry_type!(QuadMesh, GeometryKind::QUAD,
-    /// A quad mesh geometry.
+impl_geometry_type!(QuadMeshBuilder, GeometryKind::QUAD,
+    /// A quad mesh geometry builder.
     ///
     /// The index buffer must contain an array of four 32-bit indices per triangle
     /// ([`Format::UINT4`]), and the number of primitives is inferred from the size
@@ -2021,12 +2109,12 @@ impl_geometry_type!(QuadMesh, GeometryKind::QUAD,
     ///        u
 );
 
-impl_geometry_type!(UserGeometry, GeometryKind::USER,
-    /// A user geometry.
+impl_geometry_type!(UserGeometryBuilder, GeometryKind::USER,
+    /// A user geometry builder.
 );
 
-impl_geometry_type!(Instance, GeometryKind::INSTANCE,
-    /// An instance geometry.
+impl_geometry_type!(InstanceGeometryBuilder, GeometryKind::INSTANCE,
+    /// An instance geometry builder.
 );
 
 /// Helper function to convert a Rust closure to `RTCFilterFunctionN` callback
@@ -2338,7 +2426,7 @@ where
 
 /// Struct holding data for a set of vertices in SoA layout.
 /// This is used as a parameter to the callback function set by
-/// [`Geometry::set_displacement_function`].
+/// [`GeometryBuilder::set_displacement_function`].
 pub struct Vertices<'a> {
     /// The number of vertices.
     len: usize,
@@ -2465,10 +2553,10 @@ where
 }
 
 /// Struct holding data for validity masks used in the callback function set by
-/// [`Geometry::set_intersect_filter_function`],
-/// [`Geometry::set_occluded_filter_function`],
-/// [`Geometry::set_intersect_function`] and
-/// [`Geometry::set_occluded_function`].
+/// [`GeometryBuilder::set_intersect_filter_function`],
+/// [`GeometryBuilder::set_occluded_filter_function`],
+/// [`GeometryBuilder::set_intersect_function`] and
+/// [`GeometryBuilder::set_occluded_function`].
 ///
 /// - 0 means it is invalid
 /// - -1 means the ray/hit is valid
@@ -2577,10 +2665,10 @@ impl<'a, 'b> Iterator for ValidityNIterMut<'a, 'b> {
 // /// Invokes the intersection filter function.
 // ///
 // /// This function can be used inside the intersection filter function
-// callback /// ([`Geometry::set_intersect_filter_function`]) to invoke the
-// intersection /// filter function registered to the geometry and stored inside
-// the context. pub fn invoke_intersect_filter<'a, C: AsIntersectContext, D:
-// UserData>(     isect_args: &IntersectFunctionNArgs<'a, C, D>,
+// callback /// ([`GeometryBuilder::set_intersect_filter_function`]) to invoke
+// the intersection /// filter function registered to the geometry and stored
+// inside the context. pub fn invoke_intersect_filter<'a, C: AsIntersectContext,
+// D: UserData>(     isect_args: &IntersectFunctionNArgs<'a, C, D>,
 //     filter_args: &FilterFnNArgs<'a, C, D>,
 // ) {
 //     let intersect_arguments = RTCIntersectFunctionNArguments {
@@ -2606,8 +2694,8 @@ impl<'a, 'b> Iterator for ValidityNIterMut<'a, 'b> {
 // /// Invokes the occlusion filter function.
 // ///
 // /// This function can be used inside the occlusion filter function callback
-// /// ([`Geometry::set_occluded_filter_function`]) to invoke the occlusion
-// filter. pub fn invoke_occluded_filter<'a, C: AsIntersectContext, D:
+// /// ([`GeometryBuilder::set_occluded_filter_function`]) to invoke the
+// occlusion filter. pub fn invoke_occluded_filter<'a, C: AsIntersectContext, D:
 // UserData>(     occluded_args: &OccludedFnNArgs<'a, C, D>,
 //     filter_args: &FilterFnNArgs<'a, C, D>,
 // ) {
