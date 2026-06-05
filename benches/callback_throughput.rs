@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use criterion::{criterion_group, criterion_main, Criterion};
 use embree::{BufferUsage, Device, Format, GeometryKind, IntersectContext, Ray, RayHit, Scene};
 
-const GRID: usize = 512;
+const GRID: usize = 1024;
 
 /// A scene whose cube carries a stateless intersect filter. Embree invokes that
 /// filter once per hit candidate, from every traversal thread, so the filter's

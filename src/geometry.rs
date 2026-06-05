@@ -2,8 +2,8 @@
 //! GeometryBuilder`, which is the *sole* `Arc<GeometryShared>` owner (`!Clone`,
 //! `!Sync`, `strong_count == 1`). A geometry cannot be a builder while attached
 //! to a scene or cloned (`try_edit` needs sole ownership). Therefore every
-//! shared observer, for example, ther clones, `Scene::attach_geometry`'s
-//! retained clone, and Embree's traversal threads, sees the state only *after*
+//! shared observer (for example other clones, `Scene::attach_geometry`'s
+//! retained clone, and Embree's traversal threads) sees the state only *after*
 //! it is frozen. Two distinct facts make this sound:
 //!
 //! 1. `Arc::get_mut == Some` proves **exclusivity**: while a write happens, no
