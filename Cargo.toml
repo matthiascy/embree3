@@ -14,12 +14,7 @@ keywords = ["embree", "ray", "simd", "bvh"]
 build = "build.rs"
 edition = "2021"
 
-exclude = [
-	".travis.yml",
-	"*.png",
-	".gitignore",
-	"examples/*"
-]
+exclude = [".travis.yml", "*.png", ".gitignore", "examples/*"]
 
 [dependencies]
 # Optional: when enabled, the default error reporter routes embree's asynchronous
@@ -27,11 +22,16 @@ exclude = [
 # the crate stays dependency-free unless the application opts in.
 log = { version = "0.4", optional = true }
 
+[dev-dependencies]
+criterion = "0.8"
+
+[[bench]]
+name = "callback_throughput"
+harness = false
+
 [features]
 log = ["dep:log"]
 
 [workspace]
-members = [
-	"examples/*",
-]
+members = ["examples/*"]
 exclude = ["examples/todos"]
