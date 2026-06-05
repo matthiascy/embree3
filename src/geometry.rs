@@ -860,6 +860,22 @@ impl<'buf> GeometryBuilder<'buf> {
     /// Use this to share long-lived application data without an `Arc`. To make
     /// the geometry own the data instead, use
     /// [`set_intersect_filter_function_owned`](Self::set_intersect_filter_function_owned).
+    ///
+    /// The borrow is enforced at compile time, data dropped before the
+    /// geometry is a type error:
+    ///
+    /// ```compile_fail
+    /// # use embree::{Device, GeometryKind, IntersectContext};
+    /// let device = Device::new().unwrap();
+    /// let mut tri = device.create_geometry(GeometryKind::TRIANGLE).unwrap();
+    /// let data = vec![1u32, 2, 3];
+    /// tri.set_intersect_filter_function_borrowed::<_, Vec<u32>, IntersectContext>(
+    ///     |_r, _h, _v, _c, _ud| {},
+    ///     &data,
+    /// );
+    /// drop(data); // ERROR: `data` is borrowed by `tri` for its `'buf`
+    /// let _ = tri.commit(); // `tri` (holding the borrow) is still used here
+    /// ```
     pub fn set_intersect_filter_function_borrowed<F, D, C>(&mut self, filter: F, data: &'buf D)
     where
         D: UserData,
