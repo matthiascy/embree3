@@ -21,21 +21,25 @@ fn user_data_reaches_bounds_callback_correctly_typed() {
 
     let mut geom = device.create_geometry(GeometryKind::USER).unwrap();
     geom.set_user_primitive_count(1);
-    geom.set_owned_user_data(UserData { magic: 0x1234_5678 });
-    geom.set_bounds_function::<_, UserData>(move |bounds: &mut Bounds, _prim, _time, user| {
-        // A single unit box so the BVH builder is happy.
-        *bounds = Bounds {
-            lower_x: 0.0,
-            lower_y: 0.0,
-            lower_z: 0.0,
-            align0: 0.0,
-            upper_x: 1.0,
-            upper_y: 1.0,
-            upper_z: 1.0,
-            align1: 0.0,
-        };
-        *seen_in_cb.lock().unwrap() = user.map(|u| u.magic);
-    });
+    // Per-callback owned data, bound at the setter (replaces the old single-value
+    // `set_owned_user_data` + separate `set_bounds_function`).
+    geom.set_bounds_function_owned::<_, UserData>(
+        move |bounds: &mut Bounds, _prim, _time, user| {
+            // A single unit box so the BVH builder is happy.
+            *bounds = Bounds {
+                lower_x: 0.0,
+                lower_y: 0.0,
+                lower_z: 0.0,
+                align0: 0.0,
+                upper_x: 1.0,
+                upper_y: 1.0,
+                upper_z: 1.0,
+                align1: 0.0,
+            };
+            *seen_in_cb.lock().unwrap() = user.map(|u| u.magic);
+        },
+        UserData { magic: 0x1234_5678 },
+    );
 
     let geom = geom.commit();
     scene.attach_geometry(&geom);

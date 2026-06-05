@@ -19,20 +19,24 @@ fn dropping_one_clone_does_not_free_shared_user_data() {
 
     let mut geom = device.create_geometry(GeometryKind::USER).unwrap();
     geom.set_user_primitive_count(1);
-    geom.set_owned_user_data(UserData { magic: 0x0BAD_F00D });
-    geom.set_bounds_function::<_, UserData>(move |bounds: &mut Bounds, _prim, _time, user| {
-        *bounds = Bounds {
-            lower_x: 0.0,
-            lower_y: 0.0,
-            lower_z: 0.0,
-            align0: 0.0,
-            upper_x: 1.0,
-            upper_y: 1.0,
-            upper_z: 1.0,
-            align1: 0.0,
-        };
-        *seen_in_cb.lock().unwrap() = user.map(|u| u.magic);
-    });
+    // Owned data lives in the geometry's `Arc<GeometryShared>` (per-callback),
+    // so it survives until the *last* clone drops.
+    geom.set_bounds_function_owned::<_, UserData>(
+        move |bounds: &mut Bounds, _prim, _time, user| {
+            *bounds = Bounds {
+                lower_x: 0.0,
+                lower_y: 0.0,
+                lower_z: 0.0,
+                align0: 0.0,
+                upper_x: 1.0,
+                upper_y: 1.0,
+                upper_z: 1.0,
+                align1: 0.0,
+            };
+            *seen_in_cb.lock().unwrap() = user.map(|u| u.magic);
+        },
+        UserData { magic: 0x0BAD_F00D },
+    );
     let geom = geom.commit();
 
     // Clone and drop one handle BEFORE the survivor is used (the committed

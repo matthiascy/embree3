@@ -1,10 +1,11 @@
-//! `get_user_data` / `get_user_data_mut` round-trip after the user-data pointer
-//! unification. These read through the locked `GeometryData` (not the raw
-//! embree pointer), so this also guards against the type-confusion regression.
+//! `callback_data` / `callback_data_mut` round-trip for the per-callback owned
+//! data binding. These read through the lock-free `CallbackOwners` (an `Any`
+//! downcast, not the raw embree pointer), so this also guards against the
+//! type-confusion regression the old single-value API was prone to.
 
 mod common;
 
-use embree::GeometryKind;
+use embree::{Bounds, CbKind, GeometryKind};
 
 #[derive(Debug, PartialEq)]
 struct UserData {
@@ -12,30 +13,42 @@ struct UserData {
 }
 
 #[test]
-fn get_user_data_roundtrips_and_is_type_checked() {
+fn callback_data_roundtrips_and_is_type_checked() {
     let device = common::device();
     let mut geom = device.create_geometry(GeometryKind::USER).unwrap();
 
-    // Nothing set yet.
-    assert!(geom.get_user_data::<UserData>().is_none());
+    // Nothing bound yet.
+    assert!(geom.callback_data::<UserData>(CbKind::UserBounds).is_none());
 
-    geom.set_owned_user_data(UserData { magic: 0xCAFE });
+    // Bind owned data to the bounds callback. The closure body is irrelevant
+    // here (the scene is never committed); we only exercise the getters.
+    geom.set_bounds_function_owned::<_, UserData>(
+        |_b: &mut Bounds, _p, _t, _u: Option<&UserData>| {},
+        UserData { magic: 0xCAFE },
+    );
 
     // Shared read returns the value, correctly typed.
     assert_eq!(
-        geom.get_user_data::<UserData>().map(|u| u.magic),
+        geom.callback_data::<UserData>(CbKind::UserBounds)
+            .map(|u| u.magic),
         Some(0xCAFE)
     );
 
-    // A mismatched type yields None (type_id check), never a misread.
-    assert!(geom.get_user_data::<u64>().is_none());
+    // A mismatched type yields None (Any downcast fails), never a misread.
+    assert!(geom.callback_data::<u64>(CbKind::UserBounds).is_none());
 
-    // Mutable access goes through `&mut self`.
-    if let Some(u) = geom.get_user_data_mut::<UserData>() {
+    // A different slot has nothing bound.
+    assert!(geom
+        .callback_data::<UserData>(CbKind::IntersectFilter)
+        .is_none());
+
+    // Mutable access goes through `&mut self` (the unique builder).
+    if let Some(u) = geom.callback_data_mut::<UserData>(CbKind::UserBounds) {
         u.magic = 0xBEEF;
     }
     assert_eq!(
-        geom.get_user_data::<UserData>().map(|u| u.magic),
+        geom.callback_data::<UserData>(CbKind::UserBounds)
+            .map(|u| u.magic),
         Some(0xBEEF)
     );
 }

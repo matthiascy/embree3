@@ -1,9 +1,25 @@
+//! Callback closures and user-data are mutated only through a `&mut
+//! GeometryBuilder`, which is the *sole* `Arc<GeometryShared>` owner (`!Clone`,
+//! `!Sync`, `strong_count == 1`). A geometry cannot be a builder while attached
+//! to a scene or cloned (`try_edit` needs sole ownership). Therefore every
+//! shared observer, for example, ther clones, `Scene::attach_geometry`'s
+//! retained clone, and Embree's traversal threads, sees the state only *after*
+//! it is frozen. Two distinct facts make this sound:
+//!
+//! 1. `Arc::get_mut == Some` proves **exclusivity**: while a write happens, no
+//!    `&GeometryShared` reader exists at all
+//! 2. the writes become **visible** to a later reader on another thread through
+//!    the ordinary happens-before of the ownership move / thread handoff that
+//!    separates them; entering Embree's parallel `commit`/traversal, or an
+//!    `Arc` clone sent to another application thread.
+//!
+//! The refcount alone does *not* publish non-atomic `UnsafeCell` bytes; the
+//! handoff does. The trampolines and `callback_data` perform plain reads with
+//! no lock because, by (1)+(2), no write is ever concurrent with, or
+//! unpublished before them.
+
 use std::{
-    any::{Any, TypeId},
-    collections::HashMap,
-    marker::PhantomData,
-    ptr,
-    sync::Mutex,
+    any::Any, cell::UnsafeCell, collections::HashMap, marker::PhantomData, ptr, sync::Mutex,
 };
 
 use crate::{
@@ -42,76 +58,101 @@ pub(crate) enum AttachedBuffer<'buf> {
     },
 }
 
-/// User-defined data for a geometry.
+/// Identifies one of a geometry's callback slots.
 ///
-/// This contains the pointer to the user-defined data and the type ID of the
-/// user-defined data (which is used to check the type when getting the data).
-#[derive(Debug)]
-pub(crate) struct UserDataSlot {
-    /// Pointer to the user-defined data (`*mut D`), valid while `owner` (if
-    /// any) or the borrowed source lives. Read back as `*mut D` after a
-    /// `type_id` check.
-    pub data: *mut std::os::raw::c_void,
-    /// Type ID of the user-defined data.
-    pub type_id: TypeId,
-    /// `Some` when the geometry owns the data; dropping this frees it exactly
-    /// once
-    pub owner: Option<Box<dyn Any + Send + Sync>>,
+/// Pass it to [`GeometryBuilder::callback_data`] /
+/// [`Geometry::callback_data`] to read the owned data bound to a specific
+/// callback. Internally it is also the **single source of truth** for slot
+/// ordering: the (private) `CallSite` and `CallbackOwners` tables are arrays
+/// indexed by `kind as usize`, so there is no parallel name↔index mapping to
+/// drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub enum CbKind {
+    IntersectFilter,
+    OccludedFilter,
+    UserIntersect,
+    UserOccluded,
+    UserBounds,
+    Displacement,
 }
 
-// SAFETY: `data` points at a `D: UserData` (hence `Send + Sync`), owned
-// by `owner` when present or borrowed for at least the geometry's lifetime. The
-// raw pointer carries no extra thread-affinity, so the descriptor is safe to
-// send to / share with other threads.
-unsafe impl Send for UserDataSlot {}
-unsafe impl Sync for UserDataSlot {}
-
-/// Rust closures bridged to embree for one geometry, heap-owned via
-/// [`ErasedFn`].
-///
-/// A field is `Some` only after its setter has been called; the setters reject
-/// the geometry kinds a callback does not apply to. Set rarely; read by the
-/// trampolines.
-#[derive(Default, Debug)]
-pub(crate) struct GeometryCallbacks {
-    pub intersect_filter: Option<ErasedFn>,
-    pub occluded_filter: Option<ErasedFn>,
-    /// [`GeometryKind::USER`] only.
-    pub user_intersect: Option<ErasedFn>,
-    /// [`GeometryKind::USER`] only.
-    pub user_occluded: Option<ErasedFn>,
-    /// [`GeometryKind::USER`] only.
-    pub user_bounds: Option<ErasedFn>,
-    /// [`GeometryKind::SUBDIVISION`] only.
-    pub displacement: Option<ErasedFn>,
+impl CbKind {
+    /// Number of callback kinds used for the length of the per-geometry
+    /// callback slot arrays.
+    pub const COUNT: usize = 6;
 }
 
-/// Heap-owned control block that `geometryUserPtr` points at (via
-/// `Arc::as_ptr`).
-///
-/// The block itself is immutable; each concern has its own lock, so
-/// application-side user-data access never contends with callback
-/// (de)registration:
-/// - [`callbacks`](Self::callbacks): the `ErasedFn` closures; set rarely, read
-///   by the embree trampolines.
-/// - [`user_data`](Self::user_data): the application's per-geometry data.
-///
-/// INVARIANT: no code path holds both locks at once; every trampoline access is
-/// lock-copy-release. This keeps the two-mutex design deadlock-free (lock
-/// ordering is moot).
+/// One callback slot, read by the trampoline on every invocation: a raw pointer
+/// to the boxed closure plus *that callback's own* data pointer (null = no data
+/// bound). Closure and data are bound together at the setter with a
+/// statically-known `D`, so the trampoline which monomorphized over that same
+/// `D`, casts `user_data` **unchecked**; there is no resolution table and no
+/// `TypeId` on the hot path. The pointers are raw because the writer (the
+/// unique `&mut GeometryBuilder`) and the reader (the embree trampoline) never
+/// overlap (see the module invariant).
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub(crate) struct Slot {
+    pub closure: *const (), // -> the boxed `F`; recovered as `&F` (monomorphized)
+    pub user_data: *const (), // -> the callback's own `*const D`, or null
+}
+
+impl Slot {
+    const EMPTY: Slot = Slot {
+        closure: ptr::null(),
+        user_data: ptr::null(),
+    };
+}
+
+/// Hot, immutable-after-publish callback table that embree's `geometryUserPtr`
+/// points directly at, so a trampoline resolves its closure + data with a
+/// single indexed read and no pointer-chasing. `#[repr(C, align(64))]` puts it
+/// on its own cache line(s), away from the cold `owners`/`attachments` that
+/// share the enclosing `Arc` allocation, so concurrent reads from many
+/// traversal threads never false-share with a builder's cold writes.
+#[derive(Debug, Clone, Copy)]
+#[repr(C, align(64))]
+pub(crate) struct CallSite {
+    pub slots: [Slot; CbKind::COUNT],
+}
+
+impl CallSite {
+    const EMPTY: CallSite = CallSite {
+        slots: [Slot::EMPTY; CbKind::COUNT],
+    };
+}
+
+/// Cold side of the callback table: keeps each slot's boxed closure alive (the
+/// `Slot.closure` raw pointer borrows from it) and, for *owned* data, the
+/// `Box<dyn Any>` whose `Slot.user_data` points into. Borrowed data has no
+/// entry here as the application owns it, kept valid by the geometry's `'buf`
+/// lifetime. Indexed by `CbKind as usize`. Touched only by the builder setters
+/// and [`callback_data`](GeometryBuilder::callback_data); never by a
+/// trampoline.
+#[derive(Debug, Default)]
+pub(crate) struct CallbackOwners {
+    pub closures: [Option<ErasedFn>; CbKind::COUNT],
+    pub owned_data: [Option<Box<dyn Any + Send + Sync>>; CbKind::COUNT],
+}
+
+/// Heap-owned callback state that embree's `geometryUserPtr` points into: the
+/// hot [`CallSite`] (read by trampolines) and the cold [`CallbackOwners`] (the
+/// closures/data they reference). Both are `UnsafeCell` because they are
+/// mutated through a `&GeometryShared` (the builder writes via the shared
+/// `Arc`) yet read lock-free; soundness rests on the module invariant(see
+/// [`GeometryShared`]).
 #[derive(Debug)]
 pub(crate) struct GeometryData {
-    /// Rust closures bridged to embree for this geometry.
-    pub callbacks: Mutex<GeometryCallbacks>,
-    /// The application's user-defined data, if any.
-    pub user_data: Mutex<Option<UserDataSlot>>,
+    pub call_site: UnsafeCell<CallSite>,
+    pub owners: UnsafeCell<CallbackOwners>,
 }
 
 impl Default for GeometryData {
     fn default() -> Self {
         Self {
-            user_data: Mutex::new(None),
-            callbacks: Mutex::new(GeometryCallbacks::default()),
+            call_site: UnsafeCell::new(CallSite::EMPTY),
+            owners: UnsafeCell::new(CallbackOwners::default()),
         }
     }
 }
@@ -137,6 +178,16 @@ impl<'buf> Drop for GeometryShared<'buf> {
         }
     }
 }
+
+// SAFETY: `GeometryData`'s `UnsafeCell`s are mutated only through a `&mut
+// GeometryBuilder`, the unique `Arc<GeometryShared>` owner (strong_count == 1,
+// !Clone, !Sync). No shared observer (other clones, the scene's retained clone,
+// Embree's traversal threads) coexists with that mutation; and the ownership
+// move / thread handoff that must separate the last write from any later shared
+// read is what makes the writes visible (see the module invariant). So a shared
+// `&Geometry` only ever observes frozen state. The boxed `F`/`D` are
+// `Send + Sync` (enforced at registration).
+unsafe impl Sync for GeometryShared<'_> {}
 
 impl<'buf> GeometryShared<'buf> {
     /// Snapshot of the buffer bound at `(usage, slot)`, owning/copying out of
@@ -194,6 +245,14 @@ impl<'buf> GeometryShared<'buf> {
             return Err(Error::INVALID_ARGUMENT);
         }
         Ok((ptr, byte_size / t_size))
+    }
+
+    /// SAFETY: caller has exclusive access (unique `&mut GeometryBuilder`).
+    unsafe fn data_mut(&self) -> (&mut CallSite, &mut CallbackOwners) {
+        (
+            &mut *self.data.call_site.get(),
+            &mut *self.data.owners.get(),
+        )
     }
 }
 
@@ -642,76 +701,6 @@ impl<'buf> GeometryBuilder<'buf> {
         }
     }
 
-    /// Sets the user-defined data pointer of the geometry.
-    ///
-    /// The user data pointer is intended to be pointing to the application's
-    /// representation of the geometry, and is passed to various callback
-    /// functions.
-    ///
-    /// The application can use this pointer inside the callback functions to
-    /// access its geometry representation.
-    ///
-    /// Note that the user data pointer is shared across all clones of the
-    /// geometry, and the user is responsible for ensuring that the data
-    /// behind the pointer is valid for the lifetime of all geometry clones. To
-    /// avoid dangling pointers, the user can use `set_owned_user_data` to let
-    /// the geometry own the user data, which will be automatically dropped when
-    /// the geometry is destroyed.
-    ///
-    /// # Access from callbacks and thread safety
-    ///
-    /// `D` must be [`Send`] + [`Sync`] (see [`UserData`]). Callbacks
-    /// (filter / intersect / occluded / bounds / displacement) receive the data
-    /// as a shared `Option<&D>` and may run from several threads
-    /// concurrently, so:
-    ///
-    /// - **Read** it freely inside callbacks.
-    /// - To **mutate it from inside a callback**, use `Sync` interior
-    ///   mutability (`Mutex`, `RwLock`, atomics) *within* `D`; a
-    ///   `Cell`/`RefCell` field would make `D: !Sync` and fail to compile.
-    /// - To **mutate it from outside callbacks**, use
-    ///   [`GeometryBuilder::get_user_data_mut`], which is gated by `&mut self`
-    ///   (so it cannot overlap a traversal) and needs no interior mutability.
-    pub fn set_user_data<'a: 'buf, D>(&'buf mut self, user_data: &'a mut D)
-    where
-        D: UserData,
-    {
-        *self.shared.data.user_data.lock().unwrap() = Some(UserDataSlot {
-            data: user_data as *mut D as *mut std::os::raw::c_void,
-            type_id: TypeId::of::<D>(),
-            owner: None,
-        });
-    }
-
-    /// Sets the user-defined data of the geometry and let the geometry own it.
-    ///
-    /// The user data is the application's representation of the geometry and is
-    /// passed to the various callback functions. Unlike
-    /// [`GeometryBuilder::set_user_data`], the geometry owns `user_data`: there
-    /// is no dangling-pointer risk, and it is dropped when the last
-    /// clone of the geometry is dropped.
-    ///
-    /// The same callback-access and thread-safety contract as
-    /// [`GeometryBuilder::set_user_data`] applies (`D: Send + Sync`; callbacks
-    /// receive a shared `&D`; mutate via interior mutability inside a
-    /// callback, or [`GeometryBuilder::get_user_data_mut`] outside).
-    pub fn set_owned_user_data<D>(&mut self, user_data: D)
-    where
-        D: UserData,
-    {
-        let raw: *mut D = Box::into_raw(Box::new(user_data));
-        let owner: Box<dyn Any + Send + Sync> = unsafe { Box::from_raw(raw) };
-
-        // Replacing the Option drops any previous owner, freeing old owned data once.
-        *self.shared.data.user_data.lock().unwrap() = Some(UserDataSlot {
-            data: raw as *mut D as *mut std::os::raw::c_void,
-            type_id: TypeId::of::<D>(),
-            owner: Some(owner),
-        });
-        // No rtcSetGeometryUserData call: the pointer set in `new` already
-        // points at this `GeometryData` control block and never changes.
-    }
-
     /// Registers an intersection filter callback function for the geometry.
     ///
     /// Only a single callback function can be registered per geometry, and
@@ -737,8 +726,9 @@ impl<'buf> GeometryBuilder<'buf> {
     /// a number of arguments through the [`RTCFilterFunctionNArguments`]
     /// structure. The valid parameter of that structure points to an
     /// integer valid mask (0 means invalid and -1 means valid). The
-    /// `geometryUserPtr` member is a user pointer optionally set per
-    /// geometry through the [`GeometryBuilder::set_user_data`] function. The
+    /// `geometryUserPtr` member is handled by the wrapper: the data optionally
+    /// bound to *this* callback (via its `_owned` / `_borrowed` variant) is
+    /// delivered as the closure's `Option<&D>` argument. The
     /// context member points to the intersection context passed to
     /// the ray query function. The ray parameter points to N rays in SOA layout
     /// (see `RayN`, `HitN`).
@@ -794,25 +784,113 @@ impl<'buf> GeometryBuilder<'buf> {
             + Sync
             + 'static,
     {
-        let erased = ErasedFn::new(filter);
         // Register the trampoline first, then store the owner (so the old one, if any,
         // is dropped only after the new closure is installed).
         unsafe {
             rtcSetGeometryIntersectFilterFunction(
                 self.shared.handle,
-                intersect_filter_function::<F, D, C>(),
+                trampoline::intersect_filter_function::<F, D, C>(),
+            );
+            self.install_callback(
+                CbKind::IntersectFilter,
+                ErasedFn::new(filter),
+                std::ptr::null(),
+                None,
             );
         }
+    }
 
-        self.shared.data.callbacks.lock().unwrap().intersect_filter = Some(erased);
+    /// Registers an intersection filter that receives **owned** per-callback
+    /// data as its `Option<&D>` argument.
+    ///
+    /// Identical to
+    /// [`set_intersect_filter_function`](Self::set_intersect_filter_function)
+    /// (see it for the full filter contract and thread-safety bounds) except
+    /// that this callback gets its *own* `data`, distinct from every other
+    /// callback's. The geometry takes ownership of `data` and drops it exactly
+    /// once, when this slot is replaced, or when the last geometry clone is
+    /// dropped. Read it back outside the callback with
+    /// [`callback_data`](Self::callback_data) /
+    /// [`callback_data_mut`](Self::callback_data_mut).
+    ///
+    /// Use this when the geometry should own the data. To instead lend data you
+    /// keep on the application side (zero-copy, no refcount), use
+    /// [`set_intersect_filter_function_borrowed`](Self::set_intersect_filter_function_borrowed).
+    pub fn set_intersect_filter_function_owned<F, D, C>(&mut self, filter: F, data: D)
+    where
+        D: UserData,
+        C: AsIntersectContext,
+        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
+            + Send
+            + Sync
+            + 'static,
+    {
+        // SOUNDNESS: the owned-data pointer is taken before coercing `Box<D>` to
+        // `Box<dyn Any>`; coercion does not move the `D`, so `ptr` remains
+        // valid for the box's lifetime.
+        let boxed = Box::new(data);
+        let ptr = &*boxed as *const D as *const ();
+        unsafe {
+            rtcSetGeometryIntersectFilterFunction(
+                self.shared.handle,
+                trampoline::intersect_filter_function::<F, D, C>(),
+            );
+            self.install_callback(
+                CbKind::IntersectFilter,
+                ErasedFn::new(filter),
+                ptr,
+                Some(boxed),
+            );
+        }
+    }
+
+    /// Registers an intersection filter that receives **borrowed** per-callback
+    /// data as its `Option<&D>` argument.
+    ///
+    /// Identical to
+    /// [`set_intersect_filter_function`](Self::set_intersect_filter_function)
+    /// (see it for the full filter contract and thread-safety bounds) except
+    /// that this callback reads `data` that the *application* owns. Nothing is
+    /// allocated or reference-counted: `data` is borrowed for the geometry's
+    /// lifetime `'buf` (the same lifetime that bounds shared vertex buffers)
+    /// so the borrow checker forbids `data` from being dropped while the
+    /// geometry (and hence any traversal that could invoke the callback) is
+    /// still alive.
+    ///
+    /// Use this to share long-lived application data without an `Arc`. To make
+    /// the geometry own the data instead, use
+    /// [`set_intersect_filter_function_owned`](Self::set_intersect_filter_function_owned).
+    pub fn set_intersect_filter_function_borrowed<F, D, C>(&mut self, filter: F, data: &'buf D)
+    where
+        D: UserData,
+        C: AsIntersectContext,
+        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
+            + Send
+            + Sync
+            + 'static,
+    {
+        // SOUNDNESS: The borrowed form's `&'buf D` ties the data to the geometry's
+        // `'buf` (the same `'buf` shared buffers already use), so the borrow checker
+        // forbids the geometry (hence traversal) from outliving the data.
+        // `GeometryShared<'buf>` already *uses* `'buf` (via `AttachedBuffer::Shared`);
+        // keep it so (a `PhantomData<&'buf ()>` if needed) so the erased `*const ()` is
+        // not silently `'static`.
+        let ptr = &*data as *const D as *const ();
+        unsafe {
+            rtcSetGeometryIntersectFilterFunction(
+                self.shared.handle,
+                trampoline::intersect_filter_function::<F, D, C>(),
+            );
+            self.install_callback(CbKind::IntersectFilter, ErasedFn::new(filter), ptr, None);
+        }
     }
 
     /// Unsets the intersection filter function for the geometry.
     pub fn unset_intersect_filter_function(&mut self) {
         unsafe {
             rtcSetGeometryIntersectFilterFunction(self.shared.handle, None);
+            self.clear_callback(CbKind::IntersectFilter);
         }
-        self.shared.data.callbacks.lock().unwrap().intersect_filter = None;
     }
 
     /// Sets the occlusion filter for the geometry.
@@ -852,24 +930,91 @@ impl<'buf> GeometryBuilder<'buf> {
             + Sync
             + 'static,
     {
-        let erased = ErasedFn::new(filter);
         // Register the trampoline first, then store the owner (so the old one, if any)
         // is dropped only after the new closure is installed).
         unsafe {
             rtcSetGeometryOccludedFilterFunction(
                 self.shared.handle,
-                occluded_filter_function::<F, D, C>(),
+                trampoline::occluded_filter_function::<F, D, C>(),
+            );
+            self.install_callback(
+                CbKind::OccludedFilter,
+                ErasedFn::new(filter),
+                std::ptr::null(),
+                None,
             );
         }
-        self.shared.data.callbacks.lock().unwrap().occluded_filter = Some(erased);
+    }
+
+    /// The owned-data variant of
+    /// [`set_occluded_filter_function`](Self::set_occluded_filter_function).
+    /// See
+    /// [`set_intersect_filter_function_owned`](Self::set_intersect_filter_function_owned)
+    /// for the per-callback owned-vs-borrowed data model.
+    pub fn set_occluded_filter_function_owned<F, D, C>(&mut self, filter: F, data: D)
+    where
+        D: UserData,
+        C: AsIntersectContext,
+        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
+            + Send
+            + Sync
+            + 'static,
+    {
+        // SOUNDNESS: the owned-data pointer is taken before coercing `Box<D>` to
+        // `Box<dyn Any>`; coercion does not move the `D`, so `ptr` remains
+        // valid for the box's lifetime.
+        let boxed = Box::new(data);
+        let ptr = &*boxed as *const D as *const ();
+        unsafe {
+            rtcSetGeometryOccludedFilterFunction(
+                self.shared.handle,
+                trampoline::occluded_filter_function::<F, D, C>(),
+            );
+            self.install_callback(
+                CbKind::OccludedFilter,
+                ErasedFn::new(filter),
+                ptr,
+                Some(boxed),
+            );
+        }
+    }
+
+    /// The borrowed-data variant of
+    /// [`set_occluded_filter_function`](Self::set_occluded_filter_function).
+    /// See
+    /// [`set_intersect_filter_function_borrowed`](Self::set_intersect_filter_function_borrowed)
+    /// for the per-callback owned-vs-borrowed data model.
+    pub fn set_occluded_filter_function_borrowed<F, D, C>(&mut self, filter: F, data: &'buf D)
+    where
+        D: UserData,
+        C: AsIntersectContext,
+        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
+            + Send
+            + Sync
+            + 'static,
+    {
+        // SOUNDNESS: The borrowed form's `&'buf D` ties the data to the geometry's
+        // `'buf` (the same `'buf` shared buffers already use), so the borrow checker
+        // forbids the geometry (hence traversal) from outliving the data.
+        // `GeometryShared<'buf>` already *uses* `'buf` (via `AttachedBuffer::Shared`);
+        // keep it so (a `PhantomData<&'buf ()>` if needed) so the erased `*const ()` is
+        // not silently `'static`.
+        let ptr = &*data as *const D as *const ();
+        unsafe {
+            rtcSetGeometryOccludedFilterFunction(
+                self.shared.handle,
+                trampoline::occluded_filter_function::<F, D, C>(),
+            );
+            self.install_callback(CbKind::OccludedFilter, ErasedFn::new(filter), ptr, None);
+        }
     }
 
     /// Unsets the occlusion filter function for the geometry.
     pub fn unset_occluded_filter_function(&mut self) {
         unsafe {
             rtcSetGeometryOccludedFilterFunction(self.shared.handle, None);
+            self.clear_callback(CbKind::OccludedFilter);
         }
-        self.shared.data.callbacks.lock().unwrap().occluded_filter = None;
     }
 
     // TODO(yang): how to handle the closure? RTCPointQueryFunctionArguments has a
@@ -987,12 +1132,13 @@ impl<'buf> GeometryBuilder<'buf> {
     /// - a mutable reference to the bounding box where the result should be
     ///   written to
     ///
-    /// In a typical usage scenario one would store a pointer to the internal
-    /// representation of the user geometry object using
-    /// [`GeometryBuilder::set_user_data`]. The callback function can then read
-    /// that pointer from the `geometryUserPtr` field and calculate the
-    /// proper bounding box for the requested primitive and time, and store
-    /// that bounding box to the destination structure (`bounds_o` member).
+    /// In a typical usage scenario one binds the user geometry's primitive data
+    /// to this callback with
+    /// [`set_bounds_function_owned`](Self::set_bounds_function_owned) /
+    /// [`set_bounds_function_borrowed`](Self::set_bounds_function_borrowed) (or
+    /// captures it in the closure). The callback then receives it as its
+    /// `Option<&D>` argument, indexes by `prim_id`, and writes the proper
+    /// bounding box for the requested primitive and time to the destination.
     ///
     /// # Thread safety
     ///
@@ -1011,14 +1157,71 @@ impl<'buf> GeometryBuilder<'buf> {
     {
         match self.shared.kind {
             GeometryKind::USER => unsafe {
-                let erased = ErasedFn::new(bounds);
                 rtcSetGeometryBoundsFunction(
                     self.shared.handle,
-                    bounds_function::<F, D>(),
+                    trampoline::bounds_function::<F, D>(),
                     ptr::null_mut(),
                 );
-                self.shared.data.callbacks.lock().unwrap().user_bounds = Some(erased);
+                self.install_callback(
+                    CbKind::UserBounds,
+                    ErasedFn::new(bounds),
+                    std::ptr::null(),
+                    None,
+                );
             },
+            // Bounds functions apply only to user geometry; ignored otherwise.
+            _ => {}
+        }
+    }
+
+    /// The owned-data variant of
+    /// [`set_bounds_function`](Self::set_bounds_function). See
+    /// [`set_intersect_filter_function_owned`](Self::set_intersect_filter_function_owned)
+    /// for the per-callback owned-vs-borrowed data model. (User geometry only.)
+    pub fn set_bounds_function_owned<F, D>(&mut self, bounds: F, data: D)
+    where
+        D: UserData,
+        F: Fn(&mut Bounds, u32, u32, Option<&D>) + Send + Sync + 'static,
+    {
+        match self.shared.kind {
+            GeometryKind::USER => {
+                let boxed = Box::new(data);
+                let ptr = &*boxed as *const D as *const ();
+                unsafe {
+                    rtcSetGeometryBoundsFunction(
+                        self.shared.handle,
+                        trampoline::bounds_function::<F, D>(),
+                        ptr::null_mut(),
+                    );
+                }
+                self.install_callback(CbKind::UserBounds, ErasedFn::new(bounds), ptr, Some(boxed));
+            }
+            // Bounds functions apply only to user geometry; ignored otherwise.
+            _ => {}
+        }
+    }
+
+    /// The borrowed-data variant of
+    /// [`set_bounds_function`](Self::set_bounds_function). See
+    /// [`set_intersect_filter_function_borrowed`](Self::set_intersect_filter_function_borrowed)
+    /// for the per-callback owned-vs-borrowed data model. (User geometry only.)
+    pub fn set_bounds_function_borrowed<F, D>(&mut self, bounds: F, data: &'buf D)
+    where
+        D: UserData,
+        F: Fn(&mut Bounds, u32, u32, Option<&D>) + Send + Sync + 'static,
+    {
+        match self.shared.kind {
+            GeometryKind::USER => {
+                let ptr = data as *const D as *const ();
+                unsafe {
+                    rtcSetGeometryBoundsFunction(
+                        self.shared.handle,
+                        trampoline::bounds_function::<F, D>(),
+                        ptr::null_mut(),
+                    );
+                }
+                self.install_callback(CbKind::UserBounds, ErasedFn::new(bounds), ptr, None);
+            }
             // Bounds functions apply only to user geometry; ignored otherwise.
             _ => {}
         }
@@ -1030,9 +1233,9 @@ impl<'buf> GeometryBuilder<'buf> {
         match self.shared.kind {
             GeometryKind::USER => unsafe {
                 rtcSetGeometryBoundsFunction(self.shared.handle, None, ptr::null_mut());
-                self.shared.data.callbacks.lock().unwrap().user_bounds = None;
+                self.clear_callback(CbKind::UserBounds);
             },
-            _ => panic!("Only user geometries can have a bounds function!"),
+            _ => {}
         }
     }
 
@@ -1075,7 +1278,8 @@ impl<'buf> GeometryBuilder<'buf> {
     ///     - the geometry ID of the geometry to intersect
     ///     - the primitive ID of the primitive to intersect
     ///     - a shared reference to the user data of the geometry (if any); the
-    ///       user data can be set using [`GeometryBuilder::set_user_data`]
+    ///       user data is bound per callback via this setter's `_owned` /
+    ///       `_borrowed` variants
     ///
     /// The ray component of the ray hit structure contains valid data, in
     /// particular the tfar value is the current closest hit distance found.
@@ -1134,12 +1338,76 @@ impl<'buf> GeometryBuilder<'buf> {
     {
         match self.shared.kind {
             GeometryKind::USER => unsafe {
-                let erased = ErasedFn::new(intersect);
                 rtcSetGeometryIntersectFunction(
                     self.shared.handle,
-                    intersect_function::<F, D, C>(),
+                    trampoline::intersect_function::<F, D, C>(),
                 );
-                self.shared.data.callbacks.lock().unwrap().user_intersect = Some(erased);
+                self.install_callback(
+                    CbKind::UserIntersect,
+                    ErasedFn::new(intersect),
+                    std::ptr::null(),
+                    None,
+                );
+            },
+            // Intersect functions apply only to user geometry; ignored otherwise.
+            _ => {}
+        }
+    }
+
+    /// The owned-data variant of
+    /// [`set_intersect_function`](Self::set_intersect_function). See
+    /// [`set_intersect_filter_function_owned`](Self::set_intersect_filter_function_owned)
+    /// for the per-callback owned-vs-borrowed data model. (User geometry only.)
+    pub fn set_intersect_function_owned<F, D, C>(&mut self, intersect: F, data: D)
+    where
+        D: UserData,
+        C: AsIntersectContext,
+        F: for<'a> Fn(RayHitN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
+            + Send
+            + Sync
+            + 'static,
+    {
+        match self.shared.kind {
+            GeometryKind::USER => unsafe {
+                let boxed = Box::new(data);
+                let ptr = &*boxed as *const D as *const ();
+                rtcSetGeometryIntersectFunction(
+                    self.shared.handle,
+                    trampoline::intersect_function::<F, D, C>(),
+                );
+                self.install_callback(
+                    CbKind::UserIntersect,
+                    ErasedFn::new(intersect),
+                    ptr,
+                    Some(boxed),
+                );
+            },
+            // Intersect functions apply only to user geometry; ignored otherwise.
+            _ => {}
+        }
+    }
+
+    /// The borrowed-data variant of
+    /// [`set_intersect_function`](Self::set_intersect_function). See
+    /// [`set_intersect_filter_function_borrowed`](Self::set_intersect_filter_function_borrowed)
+    /// for the per-callback owned-vs-borrowed data model. (User geometry only.)
+    pub fn set_intersect_function_borrowed<F, D, C>(&mut self, intersect: F, data: &'buf D)
+    where
+        D: UserData,
+        C: AsIntersectContext,
+        F: for<'a> Fn(RayHitN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
+            + Send
+            + Sync
+            + 'static,
+    {
+        match self.shared.kind {
+            GeometryKind::USER => unsafe {
+                let ptr = data as *const D as *const ();
+                rtcSetGeometryIntersectFunction(
+                    self.shared.handle,
+                    trampoline::intersect_function::<F, D, C>(),
+                );
+                self.install_callback(CbKind::UserIntersect, ErasedFn::new(intersect), ptr, None);
             },
             // Intersect functions apply only to user geometry; ignored otherwise.
             _ => {}
@@ -1151,7 +1419,7 @@ impl<'buf> GeometryBuilder<'buf> {
         match self.shared.kind {
             GeometryKind::USER => unsafe {
                 rtcSetGeometryIntersectFunction(self.shared.handle, None);
-                self.shared.data.callbacks.lock().unwrap().user_intersect = None;
+                self.clear_callback(CbKind::UserIntersect);
             },
             // Intersect functions apply only to user geometry; ignored otherwise.
             _ => {}
@@ -1178,7 +1446,8 @@ impl<'buf> GeometryBuilder<'buf> {
     ///   - the geometry ID of the geometry to intersect
     ///   - the primitive ID of the primitive to intersect
     ///   - a shared reference to the user data of the geometry (if any); the
-    ///     user data can be set using [`GeometryBuilder::set_user_data`]
+    ///     user data is bound per callback via this setter's `_owned` /
+    ///     `_borrowed` variants
     ///
     /// # Thread safety
     ///
@@ -1201,14 +1470,82 @@ impl<'buf> GeometryBuilder<'buf> {
     {
         match self.shared.kind {
             GeometryKind::USER => {
-                let erased = ErasedFn::new(occluded);
                 unsafe {
                     rtcSetGeometryOccludedFunction(
                         self.shared.handle,
-                        occluded_function::<F, D, C>(),
+                        trampoline::occluded_function::<F, D, C>(),
                     )
                 };
-                self.shared.data.callbacks.lock().unwrap().user_occluded = Some(erased);
+                self.install_callback(
+                    CbKind::UserOccluded,
+                    ErasedFn::new(occluded),
+                    std::ptr::null(),
+                    None,
+                );
+            }
+            // Occluded functions apply only to user geometry; ignored otherwise.
+            _ => {}
+        }
+    }
+
+    /// The owned-data variant of
+    /// [`set_occluded_function`](Self::set_occluded_function). See
+    /// [`set_intersect_filter_function_owned`](Self::set_intersect_filter_function_owned)
+    /// for the per-callback owned-vs-borrowed data model. (User geometry only.)
+    pub fn set_occluded_function_owned<F, D, C>(&mut self, occluded: F, data: D)
+    where
+        D: UserData,
+        C: AsIntersectContext,
+        F: for<'a> Fn(RayN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
+            + Send
+            + Sync
+            + 'static,
+    {
+        match self.shared.kind {
+            GeometryKind::USER => {
+                let boxed = Box::new(data);
+                let ptr = &*boxed as *const D as *const ();
+                unsafe {
+                    rtcSetGeometryOccludedFunction(
+                        self.shared.handle,
+                        trampoline::occluded_function::<F, D, C>(),
+                    )
+                };
+                self.install_callback(
+                    CbKind::UserOccluded,
+                    ErasedFn::new(occluded),
+                    ptr,
+                    Some(boxed),
+                );
+            }
+            // Occluded functions apply only to user geometry; ignored otherwise.
+            _ => {}
+        }
+    }
+
+    /// The borrowed-data variant of
+    /// [`set_occluded_function`](Self::set_occluded_function). See
+    /// [`set_intersect_filter_function_borrowed`](Self::set_intersect_filter_function_borrowed)
+    /// for the per-callback owned-vs-borrowed data model. (User geometry only.)
+    pub fn set_occluded_function_borrowed<F, D, C>(&mut self, occluded: F, data: &'buf D)
+    where
+        D: UserData,
+        C: AsIntersectContext,
+        F: for<'a> Fn(RayN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
+            + Send
+            + Sync
+            + 'static,
+    {
+        match self.shared.kind {
+            GeometryKind::USER => {
+                let ptr = data as *const D as *const ();
+                unsafe {
+                    rtcSetGeometryOccludedFunction(
+                        self.shared.handle,
+                        trampoline::occluded_function::<F, D, C>(),
+                    )
+                };
+                self.install_callback(CbKind::UserOccluded, ErasedFn::new(occluded), ptr, None);
             }
             // Occluded functions apply only to user geometry; ignored otherwise.
             _ => {}
@@ -1220,7 +1557,7 @@ impl<'buf> GeometryBuilder<'buf> {
         match self.shared.kind {
             GeometryKind::USER => unsafe {
                 rtcSetGeometryOccludedFunction(self.shared.handle, None);
-                self.shared.data.callbacks.lock().unwrap().user_occluded = None;
+                self.clear_callback(CbKind::UserOccluded);
             },
             // Occluded functions apply only to user geometry; ignored otherwise.
             _ => {}
@@ -1288,34 +1625,6 @@ impl<'buf> GeometryBuilder<'buf> {
         }
     }
 
-    /// Returns a mutable reference to the geometry's user data, if one is set
-    /// and it has type `D`.
-    ///
-    /// Requires `&mut self`, so the borrow checker forbids aliasing references
-    /// through this handle. The same cross-callback / cross-[`Clone`]
-    /// aliasing contract as [`Geometry::get_user_data`] applies.
-    ///
-    /// This is the way to mutate user data **outside** of callbacks; inside a
-    /// callback the data is shared as `&D` (see
-    /// [`GeometryBuilder::set_user_data`] for mutating it there).
-    pub fn get_user_data_mut<D>(&mut self) -> Option<&mut D>
-    where
-        D: UserData,
-    {
-        let ptr: *mut D = {
-            let user_data = self.shared.data.user_data.lock().unwrap();
-            match user_data.as_ref() {
-                Some(ud) if !ud.data.is_null() && ud.type_id == TypeId::of::<D>() => {
-                    ud.data as *mut D
-                }
-                _ => return None,
-            }
-        };
-        // SAFETY: `ptr` points at a live `D` of the checked type; `&mut self` ties
-        // exclusivity to this handle. See the aliasing contract on `get_user_data`.
-        Some(unsafe { &mut *ptr })
-    }
-
     /// The geometry kind. Mirrors [`Geometry::kind`] for the build phase.
     pub fn kind(&self) -> GeometryKind { self.shared.kind }
 
@@ -1359,28 +1668,6 @@ impl<'buf> GeometryBuilder<'buf> {
         let (ptr, len) = self.shared.map_local::<T>(usage, slot)?;
         // SAFETY: validated; shared borrow of `self` for the view.
         Ok(unsafe { BufferView::from_raw_parts(ptr, len) })
-    }
-
-    /// A shared reference to the geometry's user data, if set and of type `D`.
-    /// Mirrors [`Geometry::get_user_data`], so user data can be inspected (and,
-    /// with [`get_user_data_mut`](GeometryBuilder::get_user_data_mut), mutated)
-    /// during the build phase.
-    pub fn get_user_data<D>(&self) -> Option<&D>
-    where
-        D: UserData,
-    {
-        let ptr: *const D = {
-            let user_data = self.shared.data.user_data.lock().unwrap();
-            match user_data.as_ref() {
-                Some(ud) if !ud.data.is_null() && ud.type_id == TypeId::of::<D>() => {
-                    ud.data as *const D
-                }
-                _ => return None,
-            }
-        };
-        // SAFETY: `ptr` points at a live `D` of the checked type; the shared borrow
-        // of `self` (the unique builder) rules out `&mut` aliases.
-        Some(unsafe { &*ptr })
     }
 
     /// Sets the number of primitives of a user-defined geometry.
@@ -1450,8 +1737,8 @@ impl<'buf> GeometryBuilder<'buf> {
     ///   * `time_step`: The time step for which the displacement function is
     ///     evaluated. Important for time dependent displacement and motion
     ///     blur.
-    ///   * `user_data`: The geometry user data. See
-    ///     [`GeometryBuilder::set_user_data`].
+    ///   * `user_data`: the data bound to this callback via its `_owned` /
+    ///     `_borrowed` variant, or `None`.
     ///
     /// # Safety
     ///
@@ -1473,14 +1760,89 @@ impl<'buf> GeometryBuilder<'buf> {
     {
         match self.shared.kind {
             GeometryKind::SUBDIVISION => {
-                let erased = ErasedFn::new(displacement);
                 unsafe {
                     rtcSetGeometryDisplacementFunction(
                         self.shared.handle,
-                        displacement_function::<F, D>(),
+                        trampoline::displacement_function::<F, D>(),
                     )
                 }
-                self.shared.data.callbacks.lock().unwrap().displacement = Some(erased);
+                self.install_callback(
+                    CbKind::Displacement,
+                    ErasedFn::new(displacement),
+                    std::ptr::null(),
+                    None,
+                );
+            }
+            // Displacement functions apply only to subdivision geometry; ignored
+            // otherwise.
+            _ => {}
+        }
+    }
+
+    /// The owned-data variant of
+    /// [`set_displacement_function`](Self::set_displacement_function). See
+    /// [`set_intersect_filter_function_owned`](Self::set_intersect_filter_function_owned)
+    /// for the per-callback owned-vs-borrowed data model. (Subdivision only.)
+    ///
+    /// # Safety
+    ///
+    /// Same contract as
+    /// [`set_displacement_function`](Self::set_displacement_function).
+    pub unsafe fn set_displacement_function_owned<F, D>(&mut self, displacement: F, data: D)
+    where
+        D: UserData,
+        F: for<'a> Fn(RTCGeometry, Vertices<'a>, u32, u32, Option<&D>) + Send + Sync + 'static,
+    {
+        match self.shared.kind {
+            GeometryKind::SUBDIVISION => {
+                let boxed = Box::new(data);
+                let ptr = &*boxed as *const D as *const ();
+                unsafe {
+                    rtcSetGeometryDisplacementFunction(
+                        self.shared.handle,
+                        trampoline::displacement_function::<F, D>(),
+                    )
+                }
+                self.install_callback(
+                    CbKind::Displacement,
+                    ErasedFn::new(displacement),
+                    ptr,
+                    Some(boxed),
+                );
+            }
+            // Displacement functions apply only to subdivision geometry; ignored
+            // otherwise.
+            _ => {}
+        }
+    }
+
+    /// The borrowed-data variant of
+    /// [`set_displacement_function`](Self::set_displacement_function). See
+    /// [`set_intersect_filter_function_borrowed`](Self::set_intersect_filter_function_borrowed)
+    /// for the per-callback owned-vs-borrowed data model. (Subdivision only.)
+    ///
+    /// # Safety
+    ///
+    /// Same contract as
+    /// [`set_displacement_function`](Self::set_displacement_function).
+    pub unsafe fn set_displacement_function_borrowed<F, D>(
+        &mut self,
+        displacement: F,
+        data: &'buf D,
+    ) where
+        D: UserData,
+        F: for<'a> Fn(RTCGeometry, Vertices<'a>, u32, u32, Option<&D>) + Send + Sync + 'static,
+    {
+        match self.shared.kind {
+            GeometryKind::SUBDIVISION => {
+                let ptr = data as *const D as *const ();
+                unsafe {
+                    rtcSetGeometryDisplacementFunction(
+                        self.shared.handle,
+                        trampoline::displacement_function::<F, D>(),
+                    )
+                }
+                self.install_callback(CbKind::Displacement, ErasedFn::new(displacement), ptr, None);
             }
             // Displacement functions apply only to subdivision geometry; ignored
             // otherwise.
@@ -1493,7 +1855,7 @@ impl<'buf> GeometryBuilder<'buf> {
         match self.shared.kind {
             GeometryKind::SUBDIVISION => unsafe {
                 rtcSetGeometryDisplacementFunction(self.shared.handle, None);
-                self.shared.data.callbacks.lock().unwrap().displacement = None;
+                self.clear_callback(CbKind::Displacement);
             },
             _ => panic!("Only subdivision geometries can have displacement functions!"),
         }
@@ -1575,6 +1937,54 @@ impl<'buf> GeometryBuilder<'buf> {
             shared: self.shared,
         }
     }
+
+    /// The *owned* data bound to `kind` (set via `set_*_owned`), if its type is
+    /// `D`. Borrowed data is not returned here, the application already
+    /// owns it. Type check is a free `Any` downcast (no stored `TypeId`).
+    pub fn callback_data<D: UserData>(&self, kind: CbKind) -> Option<&D> {
+        // SAFETY: a live clone => not sole owner => no concurrent mutation (invariant).
+        unsafe {
+            (*self.shared.data.owners.get()).owned_data[kind as usize]
+                .as_ref()?
+                .downcast_ref::<D>()
+        }
+    }
+    /// `&mut` to owned data, during the build phase (unique builder =>
+    /// exclusive).
+    pub fn callback_data_mut<D: UserData>(&mut self, kind: CbKind) -> Option<&mut D> {
+        unsafe {
+            (*self.shared.data.owners.get()).owned_data[kind as usize]
+                .as_mut()?
+                .downcast_mut::<D>()
+        }
+    }
+
+    fn install_callback(
+        &mut self,
+        kind: CbKind,
+        erased: ErasedFn,
+        user_data: *const (),
+        owned_data: Option<Box<dyn Any + Send + Sync>>,
+    ) {
+        unsafe {
+            let (site, owners) = self.shared.data_mut();
+            let i = kind as usize;
+            site.slots[i].closure = erased.as_ptr() as *const ();
+            site.slots[i].user_data = user_data;
+            owners.closures[i] = Some(erased);
+            owners.owned_data[i] = owned_data;
+        }
+    }
+
+    fn clear_callback(&mut self, kind: CbKind) {
+        unsafe {
+            let (site, owners) = self.shared.data_mut();
+            let i = kind as usize;
+            site.slots[i] = Slot::EMPTY;
+            owners.closures[i] = None;
+            owners.owned_data[i] = None;
+        }
+    }
 }
 
 /// The **committed, shareable phase** of an Embree geometry.
@@ -1590,7 +2000,7 @@ impl<'buf> GeometryBuilder<'buf> {
 ///
 /// Only read-only operations live here ([`interpolate`](Geometry::interpolate),
 /// [`get_buffer`](Geometry::get_buffer),
-/// [`get_user_data`](Geometry::get_user_data), the half-edge topology queries,
+/// [`callback_data`](Geometry::callback_data), the half-edge topology queries,
 /// …). Every mutator lives on [`GeometryBuilder`].
 ///
 /// To modify a geometry again, regain a [`GeometryBuilder`] with
@@ -1610,6 +2020,15 @@ pub struct Geometry<'buf> {
 }
 
 unsafe impl<'buf> Send for Geometry<'buf> {}
+
+// SAFETY: `GeometryData`'s `UnsafeCell`s are mutated only through a `&mut
+// GeometryBuilder`, the unique `Arc<GeometryShared>` owner (strong_count == 1,
+// !Clone, !Sync). No shared observer (other clones, the scene's retained clone,
+// Embree's traversal threads) coexists with that mutation; and the ownership
+// move / thread handoff that must separate the last write from any later shared
+// read is what makes the writes visible (see the module invariant). So a shared
+// `&Geometry` only ever observes frozen state. The boxed `F`/`D` are
+// `Send + Sync` (enforced at registration).
 unsafe impl<'buf> Sync for Geometry<'buf> {}
 
 impl<'buf> Geometry<'buf> {
@@ -1645,7 +2064,7 @@ impl<'buf> Geometry<'buf> {
             data: GeometryData::default(),
         });
         unsafe {
-            rtcSetGeometryUserData(handle, Arc::as_ptr(&shared) as *mut _);
+            rtcSetGeometryUserData(handle, shared.data.call_site.get() as *mut _);
         }
         GeometryBuilder { shared }
     }
@@ -1715,40 +2134,16 @@ impl<'buf> Geometry<'buf> {
     /// Returns the type of geometry of this geometry.
     pub fn kind(&self) -> GeometryKind { self.shared.kind }
 
-    /// Returns a shared reference to the geometry's user data, if one is set
-    /// and it has type `D`.
-    ///
-    /// # Aliasing contract
-    ///
-    /// The returned reference borrows `self`. The same user data is also handed
-    /// to Embree callbacks (filter / intersect / occluded / bounds) during
-    /// [`Scene::commit`](crate::Scene::commit) and the `intersect` / `occluded`
-    /// / `point_query` calls. Embree requires geometry modification and
-    /// traversal never to overlap, so do not hold a reference obtained here
-    /// across such a call, and do not access the same geometry's data
-    /// through a [`Clone`] of this handle at the same time. (The data lives
-    /// behind a shared `Arc`, so the borrow checker cannot enforce this
-    /// across clones, it is the caller's contract, matching Embree's
-    /// threading model.)
-    pub fn get_user_data<D>(&self) -> Option<&D>
-    where
-        D: UserData,
-    {
-        // Validate and copy the pointer out from under the lock, then form a reference
-        // tied to `&self` (the user data outlives the geometry's borrow).
-        let ptr: *const D = {
-            let user_data = self.shared.data.user_data.lock().unwrap();
-            match user_data.as_ref() {
-                Some(ud) if !ud.data.is_null() && ud.type_id == TypeId::of::<D>() => {
-                    ud.data as *const D
-                }
-                _ => return None,
-            }
-        };
-        // SAFETY: `ptr` points at a live `D` of the checked type; the shared borrow of
-        // `self` rules out `&mut` aliases through this handle. See the aliasing
-        // contract.
-        Some(unsafe { &*ptr })
+    /// The *owned* data bound to `kind` (set via `set_*_owned`), if its type is
+    /// `D`. Borrowed data is not returned here, the application already
+    /// owns it. Type check is a free `Any` downcast (no stored `TypeId`).
+    pub fn callback_data<D: UserData>(&self, kind: CbKind) -> Option<&D> {
+        // SAFETY: a live clone => not sole owner => no concurrent mutation (invariant).
+        unsafe {
+            (*self.shared.data.owners.get()).owned_data[kind as usize]
+                .as_ref()?
+                .downcast_ref::<D>()
+        }
     }
 
     /// Smoothly interpolates per-vertex data over the geometry.
@@ -2239,181 +2634,6 @@ impl_geometry_type!(InstanceGeometryBuilder, GeometryKind::INSTANCE,
     /// An instance geometry builder.
 );
 
-/// Helper function to convert a Rust closure to `RTCFilterFunctionN` callback
-/// for intersect.
-fn intersect_filter_function<F, D, C>() -> RTCFilterFunctionN
-where
-    D: UserData,
-    C: AsIntersectContext,
-    F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>) + Send + Sync + 'static,
-{
-    unsafe extern "C" fn inner<F, D, C>(args: *const RTCFilterFunctionNArguments)
-    where
-        D: UserData,
-        C: AsIntersectContext,
-        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
-            + Send
-            + Sync
-            + 'static,
-    {
-        let shared = &*((*args).geometryUserPtr as *const GeometryShared);
-
-        let cb_ptr = shared
-            .data
-            .callbacks
-            .lock()
-            .unwrap()
-            .intersect_filter
-            .as_ref()
-            .map(|e| e.as_ptr());
-
-        let Some(cb_ptr) = cb_ptr else { return };
-
-        let (user_ptr, user_tid) = match shared.data.user_data.lock().unwrap().as_ref() {
-            Some(u) => (u.data, u.type_id),
-            None => (std::ptr::null_mut(), TypeId::of::<()>()),
-        };
-
-        let cb = &*(cb_ptr as *const F);
-        let user_data = if user_ptr.is_null() || user_tid != TypeId::of::<D>() {
-            None
-        } else {
-            Some(&*(user_ptr as *const D))
-        };
-
-        let len = (*args).N as usize;
-        cb(
-            RayN {
-                ptr: (*args).ray,
-                len,
-                marker: PhantomData,
-            },
-            HitN {
-                ptr: (*args).hit,
-                len,
-                marker: PhantomData,
-            },
-            ValidityN {
-                ptr: (*args).valid,
-                len,
-                marker: PhantomData,
-            },
-            &mut *((*args).context as *mut _ as *mut C),
-            user_data,
-        );
-    }
-    Some(inner::<F, D, C>)
-}
-
-/// Helper function to convert a Rust closure to `RTCFilterFunctionN` callback
-/// for occluded.
-fn occluded_filter_function<F, D, C>() -> RTCFilterFunctionN
-where
-    D: UserData,
-    C: AsIntersectContext,
-    F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>) + Send + Sync + 'static,
-{
-    unsafe extern "C" fn inner<F, D, C>(args: *const RTCFilterFunctionNArguments)
-    where
-        D: UserData,
-        C: AsIntersectContext,
-        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
-            + Send
-            + Sync
-            + 'static,
-    {
-        let shared = &*((*args).geometryUserPtr as *const GeometryShared);
-        let cb_ptr = shared
-            .data
-            .callbacks
-            .lock()
-            .unwrap()
-            .occluded_filter
-            .as_ref()
-            .map(|e| e.as_ptr());
-        let Some(cb_ptr) = cb_ptr else { return };
-
-        let (user_ptr, user_tid) = match shared.data.user_data.lock().unwrap().as_ref() {
-            Some(u) => (u.data, u.type_id),
-            None => (std::ptr::null_mut(), TypeId::of::<()>()),
-        };
-
-        let cb = &*(cb_ptr as *const F);
-        let user_data = if user_ptr.is_null() || user_tid != TypeId::of::<D>() {
-            None
-        } else {
-            Some(&*(user_ptr as *const D))
-        };
-
-        let len = (*args).N as usize;
-        cb(
-            RayN {
-                ptr: (*args).ray,
-                len,
-                marker: PhantomData,
-            },
-            HitN {
-                ptr: (*args).hit,
-                len,
-                marker: PhantomData,
-            },
-            ValidityN {
-                ptr: (*args).valid,
-                len,
-                marker: PhantomData,
-            },
-            &mut *((*args).context as *mut _ as *mut C),
-            user_data,
-        );
-    }
-
-    Some(inner::<F, D, C>)
-}
-
-/// Helper function to convert a Rust closure to `RTCBoundsFunction` callback.
-fn bounds_function<F, D>() -> RTCBoundsFunction
-where
-    D: UserData,
-    F: Fn(&mut Bounds, u32, u32, Option<&D>) + Send + Sync + 'static,
-{
-    unsafe extern "C" fn inner<F, D>(args: *const RTCBoundsFunctionArguments)
-    where
-        D: UserData,
-        F: Fn(&mut Bounds, u32, u32, Option<&D>) + Send + Sync + 'static,
-    {
-        let shared = &*((*args).geometryUserPtr as *const GeometryShared);
-        let cb_ptr = shared
-            .data
-            .callbacks
-            .lock()
-            .unwrap()
-            .user_bounds
-            .as_ref()
-            .map(|e| e.as_ptr());
-        let (user_ptr, user_tid) = match shared.data.user_data.lock().unwrap().as_ref() {
-            Some(u) => (u.data, u.type_id),
-            None => (std::ptr::null_mut(), TypeId::of::<()>()),
-        };
-
-        let Some(cb_ptr) = cb_ptr else { return };
-        let cb = &*(cb_ptr as *const F);
-        let user_data = if user_ptr.is_null() || user_tid != TypeId::of::<D>() {
-            None
-        } else {
-            Some(&*(user_ptr as *const D))
-        };
-
-        cb(
-            &mut *(*args).bounds_o,
-            (*args).primID,
-            (*args).timeStep,
-            user_data,
-        );
-    }
-
-    Some(inner::<F, D>)
-}
-
 pub struct IntersectFunctionNArgs<'a, C: AsIntersectContext, D: UserData> {
     pub ray_hit_n: RayHitN<'a>,
     pub valid_n: ValidityN<'a>,
@@ -2429,15 +2649,136 @@ impl<'a, C: AsIntersectContext, D: UserData> IntersectFunctionNArgs<'a, C, D> {
     pub fn len(&self) -> usize { self.ray_hit_n.len() }
 }
 
-/// Helper function to convert a Rust closure to `RTCIntersectFunctionN`
-/// callback.
-fn intersect_function<F, D, C>() -> RTCIntersectFunctionN
-where
-    D: UserData,
-    C: AsIntersectContext,
-    F: for<'a> Fn(RayHitN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>) + Send + Sync + 'static,
-{
-    unsafe extern "C" fn inner<F, D, C>(args: *const RTCIntersectFunctionNArguments)
+mod trampoline {
+    use super::*;
+
+    /// Helper function to convert a Rust closure to `RTCFilterFunctionN`
+    /// callback for intersect.
+    pub(crate) fn intersect_filter_function<F, D, C>() -> RTCFilterFunctionN
+    where
+        D: UserData,
+        C: AsIntersectContext,
+        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
+            + Send
+            + Sync
+            + 'static,
+    {
+        unsafe extern "C" fn inner<F, D, C>(args: *const RTCFilterFunctionNArguments)
+        where
+            D: UserData,
+            C: AsIntersectContext,
+            F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
+                + Send
+                + Sync
+                + 'static,
+        {
+            let site = &*((*args).geometryUserPtr as *const CallSite);
+            let slot = site.slots[CbKind::IntersectFilter as usize];
+            if slot.closure.is_null() {
+                return;
+            }
+
+            // SAFETY: `closure` is the boxed `F` (stable until Drop, which cannot run while
+            // a trampoline does). For a ZST `F`, this reads no memory.
+            let cb = &*(slot.closure as *const F);
+            let user_data = if slot.user_data.is_null() {
+                None
+            } else {
+                // SAFETY: bound at registration with this exact `D` (the setter is generic
+                // over the same `D` as this monomorphized trampoline), so the cast is sound
+                // by construction, no runtime type check needed.
+                Some(&*(slot.user_data as *const D))
+            };
+
+            let len = (*args).N as usize;
+            cb(
+                RayN {
+                    ptr: (*args).ray,
+                    len,
+                    marker: PhantomData,
+                },
+                HitN {
+                    ptr: (*args).hit,
+                    len,
+                    marker: PhantomData,
+                },
+                ValidityN {
+                    ptr: (*args).valid,
+                    len,
+                    marker: PhantomData,
+                },
+                &mut *((*args).context as *mut _ as *mut C),
+                user_data,
+            );
+        }
+        Some(inner::<F, D, C>)
+    }
+
+    /// Helper function to convert a Rust closure to `RTCFilterFunctionN`
+    /// callback for occluded.
+    pub(crate) fn occluded_filter_function<F, D, C>() -> RTCFilterFunctionN
+    where
+        D: UserData,
+        C: AsIntersectContext,
+        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
+            + Send
+            + Sync
+            + 'static,
+    {
+        unsafe extern "C" fn inner<F, D, C>(args: *const RTCFilterFunctionNArguments)
+        where
+            D: UserData,
+            C: AsIntersectContext,
+            F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
+                + Send
+                + Sync
+                + 'static,
+        {
+            let site = &*((*args).geometryUserPtr as *const CallSite);
+            let slot = site.slots[CbKind::OccludedFilter as usize];
+            if slot.closure.is_null() {
+                return;
+            }
+
+            // SAFETY: `closure` is the boxed `F` (stable until Drop, which cannot run while
+            // a trampoline does). For a ZST `F`, this reads no memory.
+            let cb = &*(slot.closure as *const F);
+            let user_data = if slot.user_data.is_null() {
+                None
+            } else {
+                // SAFETY: bound at registration with this exact `D` (the setter is generic
+                // over the same `D` as this monomorphized trampoline), so the cast is sound
+                // by construction, no runtime type check needed.
+                Some(&*(slot.user_data as *const D))
+            };
+
+            let len = (*args).N as usize;
+            cb(
+                RayN {
+                    ptr: (*args).ray,
+                    len,
+                    marker: PhantomData,
+                },
+                HitN {
+                    ptr: (*args).hit,
+                    len,
+                    marker: PhantomData,
+                },
+                ValidityN {
+                    ptr: (*args).valid,
+                    len,
+                    marker: PhantomData,
+                },
+                &mut *((*args).context as *mut _ as *mut C),
+                user_data,
+            );
+        }
+        Some(inner::<F, D, C>)
+    }
+
+    /// Helper function to convert a Rust closure to `RTCIntersectFunctionN`
+    /// callback.
+    pub(crate) fn intersect_function<F, D, C>() -> RTCIntersectFunctionN
     where
         D: UserData,
         C: AsIntersectContext,
@@ -2446,57 +2787,99 @@ where
             + Sync
             + 'static,
     {
-        let shared = &*((*args).geometryUserPtr as *const GeometryShared);
-        let cb_ptr = shared
-            .data
-            .callbacks
-            .lock()
-            .unwrap()
-            .user_intersect
-            .as_ref()
-            .map(|e| e.as_ptr());
-        let Some(cb_ptr) = cb_ptr else { return };
-        let (user_ptr, user_tid) = match shared.data.user_data.lock().unwrap().as_ref() {
-            Some(u) => (u.data, u.type_id),
-            None => (std::ptr::null_mut(), TypeId::of::<()>()),
-        };
-        let cb = &*(cb_ptr as *const F);
-        let user_data = if user_ptr.is_null() || user_tid != TypeId::of::<D>() {
-            None
-        } else {
-            Some(&*(user_ptr as *const D))
-        };
-        let len = (*args).N as usize;
-        cb(
-            RayHitN {
-                ptr: (*args).rayhit,
-                len,
-                marker: PhantomData,
-            },
-            ValidityN {
-                ptr: (*args).valid,
-                len,
-                marker: PhantomData,
-            },
-            &mut *((*args).context as *mut _ as *mut C),
-            (*args).geomID,
-            (*args).primID,
-            user_data,
-        );
+        unsafe extern "C" fn inner<F, D, C>(args: *const RTCIntersectFunctionNArguments)
+        where
+            D: UserData,
+            C: AsIntersectContext,
+            F: for<'a> Fn(RayHitN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
+                + Send
+                + Sync
+                + 'static,
+        {
+            let site = &*((*args).geometryUserPtr as *const CallSite);
+            let slot = site.slots[CbKind::UserIntersect as usize];
+            if slot.closure.is_null() {
+                return;
+            }
+
+            // SAFETY: `closure` is the boxed `F` (stable until Drop, which cannot run while
+            // a trampoline does). For a ZST `F`, this reads no memory.
+            let cb = &*(slot.closure as *const F);
+            let user_data = if slot.user_data.is_null() {
+                None
+            } else {
+                // SAFETY: bound at registration with this exact `D` (the setter is generic
+                // over the same `D` as this monomorphized trampoline), so the cast is sound
+                // by construction, no runtime type check needed.
+                Some(&*(slot.user_data as *const D))
+            };
+            let len = (*args).N as usize;
+
+            cb(
+                RayHitN {
+                    ptr: (*args).rayhit,
+                    len,
+                    marker: PhantomData,
+                },
+                ValidityN {
+                    ptr: (*args).valid,
+                    len,
+                    marker: PhantomData,
+                },
+                &mut *((*args).context as *mut _ as *mut C),
+                (*args).geomID,
+                (*args).primID,
+                user_data,
+            );
+        }
+
+        Some(inner::<F, D, C>)
     }
 
-    Some(inner::<F, D, C>)
-}
+    /// Helper function to convert a Rust closure to `RTCBoundsFunction`
+    /// callback.
+    pub(crate) fn bounds_function<F, D>() -> RTCBoundsFunction
+    where
+        D: UserData,
+        F: Fn(&mut Bounds, u32, u32, Option<&D>) + Send + Sync + 'static,
+    {
+        unsafe extern "C" fn inner<F, D>(args: *const RTCBoundsFunctionArguments)
+        where
+            D: UserData,
+            F: Fn(&mut Bounds, u32, u32, Option<&D>) + Send + Sync + 'static,
+        {
+            let site = &*((*args).geometryUserPtr as *const CallSite);
+            let slot = site.slots[CbKind::UserBounds as usize];
+            if slot.closure.is_null() {
+                return;
+            }
 
-/// Helper function to convert a Rust closure to `RTCOccludedFunctionN`
-/// callback.
-fn occluded_function<F, D, C>() -> RTCOccludedFunctionN
-where
-    D: UserData,
-    C: AsIntersectContext,
-    F: for<'a> Fn(RayN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>) + Send + Sync + 'static,
-{
-    unsafe extern "C" fn inner<F, D, C>(args: *const RTCOccludedFunctionNArguments)
+            // SAFETY: `closure` is the boxed `F` (stable until Drop, which cannot run while
+            // a trampoline does). For a ZST `F`, this reads no memory.
+            let cb = &*(slot.closure as *const F);
+            let user_data = if slot.user_data.is_null() {
+                None
+            } else {
+                // SAFETY: bound at registration with this exact `D` (the setter is generic
+                // over the same `D` as this monomorphized trampoline), so the cast is sound
+                // by construction, no runtime type check needed.
+                Some(&*(slot.user_data as *const D))
+            };
+
+            cb(
+                &mut *(*args).bounds_o,
+                (*args).primID,
+                (*args).timeStep,
+                user_data,
+            );
+        }
+
+        Some(inner::<F, D>)
+    }
+
+    /// Helper function to convert a Rust closure to `RTCOccludedFunctionN`
+    /// callback.
+    pub(crate) fn occluded_function<F, D, C>() -> RTCOccludedFunctionN
     where
         D: UserData,
         C: AsIntersectContext,
@@ -2505,45 +2888,108 @@ where
             + Sync
             + 'static,
     {
-        let shared = &*((*args).geometryUserPtr as *const GeometryShared);
-        let cb_ptr = shared
-            .data
-            .callbacks
-            .lock()
-            .unwrap()
-            .user_occluded
-            .as_ref()
-            .map(|e| e.as_ptr());
-        let Some(cb_ptr) = cb_ptr else { return };
-        let (user_ptr, user_tid) = match shared.data.user_data.lock().unwrap().as_ref() {
-            Some(u) => (u.data, u.type_id),
-            None => (std::ptr::null_mut(), TypeId::of::<()>()),
-        };
-        let cb = &*(cb_ptr as *const F);
-        let user_data = if user_ptr.is_null() || user_tid != TypeId::of::<D>() {
-            None
-        } else {
-            Some(&*(user_ptr as *const D))
-        };
-        cb(
-            RayN {
-                ptr: (*args).ray,
-                len: (*args).N as usize,
-                marker: PhantomData,
-            },
-            ValidityN {
-                ptr: (*args).valid,
-                len: (*args).N as usize,
-                marker: PhantomData,
-            },
-            &mut *((*args).context as *mut _ as *mut C),
-            (*args).geomID,
-            (*args).primID,
-            user_data,
-        )
+        unsafe extern "C" fn inner<F, D, C>(args: *const RTCOccludedFunctionNArguments)
+        where
+            D: UserData,
+            C: AsIntersectContext,
+            F: for<'a> Fn(RayN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
+                + Send
+                + Sync
+                + 'static,
+        {
+            let site = &*((*args).geometryUserPtr as *const CallSite);
+            let slot = site.slots[CbKind::UserOccluded as usize];
+            if slot.closure.is_null() {
+                return;
+            }
+
+            // SAFETY: `closure` is the boxed `F` (stable until Drop, which cannot run while
+            // a trampoline does). For a ZST `F`, this reads no memory.
+            let cb = &*(slot.closure as *const F);
+            let user_data = if slot.user_data.is_null() {
+                None
+            } else {
+                // SAFETY: bound at registration with this exact `D` (the setter is generic
+                // over the same `D` as this monomorphized trampoline), so the cast is sound
+                // by construction, no runtime type check needed.
+                Some(&*(slot.user_data as *const D))
+            };
+
+            cb(
+                RayN {
+                    ptr: (*args).ray,
+                    len: (*args).N as usize,
+                    marker: PhantomData,
+                },
+                ValidityN {
+                    ptr: (*args).valid,
+                    len: (*args).N as usize,
+                    marker: PhantomData,
+                },
+                &mut *((*args).context as *mut _ as *mut C),
+                (*args).geomID,
+                (*args).primID,
+                user_data,
+            )
+        }
+
+        Some(inner::<F, D, C>)
     }
 
-    Some(inner::<F, D, C>)
+    /// Helper function to convert a Rust closure to `RTCDisplacementFunctionN`
+    /// callback.
+    pub(crate) fn displacement_function<F, D>() -> RTCDisplacementFunctionN
+    where
+        D: UserData,
+        F: for<'a> Fn(RTCGeometry, Vertices<'a>, u32, u32, Option<&D>) + Send + Sync + 'static,
+    {
+        unsafe extern "C" fn inner<F, D>(args: *const RTCDisplacementFunctionNArguments)
+        where
+            D: UserData,
+            F: for<'a> Fn(RTCGeometry, Vertices<'a>, u32, u32, Option<&D>) + Send + Sync + 'static,
+        {
+            let site = &*((*args).geometryUserPtr as *const CallSite);
+            let slot = site.slots[CbKind::Displacement as usize];
+            if slot.closure.is_null() {
+                return;
+            }
+
+            // SAFETY: `closure` is the boxed `F` (stable until Drop, which cannot run while
+            // a trampoline does). For a ZST `F`, this reads no memory.
+            let cb = &*(slot.closure as *const F);
+            let user_data = if slot.user_data.is_null() {
+                None
+            } else {
+                // SAFETY: bound at registration with this exact `D` (the setter is generic
+                // over the same `D` as this monomorphized trampoline), so the cast is sound
+                // by construction, no runtime type check needed.
+                Some(&*(slot.user_data as *const D))
+            };
+
+            let len = (*args).N as usize;
+            let vertices = Vertices {
+                len,
+                u: (*args).u,
+                v: (*args).v,
+                ng_x: (*args).Ng_x,
+                ng_y: (*args).Ng_y,
+                ng_z: (*args).Ng_z,
+                p_x: (*args).P_x,
+                p_y: (*args).P_y,
+                p_z: (*args).P_z,
+                marker: PhantomData,
+            };
+            cb(
+                (*args).geometry,
+                vertices,
+                (*args).primID,
+                (*args).timeStep,
+                user_data,
+            );
+        }
+
+        Some(inner::<F, D>)
+    }
 }
 
 /// Struct holding data for a set of vertices in SoA layout.
@@ -2615,63 +3061,6 @@ impl<'a> Iterator for VerticesIterMut<'a> {
 
 impl<'a> ExactSizeIterator for VerticesIterMut<'a> {
     fn len(&self) -> usize { self.inner.len - self.cur }
-}
-
-/// Helper function to convert a Rust closure to `RTCDisplacementFunctionN`
-/// callback.
-fn displacement_function<F, D>() -> RTCDisplacementFunctionN
-where
-    D: UserData,
-    F: for<'a> Fn(RTCGeometry, Vertices<'a>, u32, u32, Option<&D>) + Send + Sync + 'static,
-{
-    unsafe extern "C" fn inner<F, D>(args: *const RTCDisplacementFunctionNArguments)
-    where
-        D: UserData,
-        F: for<'a> Fn(RTCGeometry, Vertices<'a>, u32, u32, Option<&D>) + Send + Sync + 'static,
-    {
-        let shared = &*((*args).geometryUserPtr as *const GeometryShared);
-        let cb_ptr = shared
-            .data
-            .callbacks
-            .lock()
-            .unwrap()
-            .displacement
-            .as_ref()
-            .map(|e| e.as_ptr());
-        let Some(cb_ptr) = cb_ptr else { return };
-        let (user_ptr, user_tid) = match shared.data.user_data.lock().unwrap().as_ref() {
-            Some(u) => (u.data, u.type_id),
-            None => (std::ptr::null_mut(), TypeId::of::<()>()),
-        };
-        let cb = &*(cb_ptr as *const F);
-        let user_data = if user_ptr.is_null() || user_tid != TypeId::of::<D>() {
-            None
-        } else {
-            Some(&*(user_ptr as *const D))
-        };
-        let len = (*args).N as usize;
-        let vertices = Vertices {
-            len,
-            u: (*args).u,
-            v: (*args).v,
-            ng_x: (*args).Ng_x,
-            ng_y: (*args).Ng_y,
-            ng_z: (*args).Ng_z,
-            p_x: (*args).P_x,
-            p_y: (*args).P_y,
-            p_z: (*args).P_z,
-            marker: PhantomData,
-        };
-        cb(
-            (*args).geometry,
-            vertices,
-            (*args).primID,
-            (*args).timeStep,
-            user_data,
-        );
-    }
-
-    Some(inner::<F, D>)
 }
 
 /// Struct holding data for validity masks used in the callback function set by
