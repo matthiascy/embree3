@@ -990,6 +990,48 @@ impl<'a> Scene<'a> {
         }
     }
 
+    /// Finds the closest hit for **M scattered single rays**, passed as an
+    /// array of pointers (`rtcIntersect1Mp`).
+    ///
+    /// Unlike [`intersect_stream_aos`](Self::intersect_stream_aos) (contiguous
+    /// `1M` / `NM`), the rays need not be laid out contiguously: each
+    /// `&mut RayHit` may live anywhere in memory. Results are written back in
+    /// place through the references. A ray is inactive if its `tnear > tfar`.
+    pub fn intersect1mp<C: AsIntersectContext>(&self, ctx: &mut C, rayhits: &mut [&mut RayHit]) {
+        // Build the array of pointers embree expects (`*mut *mut RTCRayHit`). The
+        // `&mut [&mut RayHit]` borrow keeps every target valid and exclusive for
+        // the call.
+        let mut ptrs: Vec<*mut RTCRayHit> = rayhits
+            .iter_mut()
+            .map(|r| &mut **r as *mut RTCRayHit)
+            .collect();
+        unsafe {
+            rtcIntersect1Mp(
+                self.handle,
+                ctx.as_mut_context_ptr(),
+                ptrs.as_mut_ptr(),
+                ptrs.len() as u32,
+            );
+        }
+    }
+
+    /// Tests occlusion for **M scattered single rays**, passed as an array of
+    /// pointers (`rtcOccluded1Mp`).
+    ///
+    /// The occlusion counterpart of [`intersect1mp`](Self::intersect1mp); an
+    /// occluded ray has its `tfar` set to `-inf` in place.
+    pub fn occluded1mp<C: AsIntersectContext>(&self, ctx: &mut C, rays: &mut [&mut Ray]) {
+        let mut ptrs: Vec<*mut RTCRay> = rays.iter_mut().map(|r| &mut **r as *mut RTCRay).collect();
+        unsafe {
+            rtcOccluded1Mp(
+                self.handle,
+                ctx.as_mut_context_ptr(),
+                ptrs.as_mut_ptr(),
+                ptrs.len() as u32,
+            );
+        }
+    }
+
     /// Returns the axis-aligned bounding box of the scene.
     pub fn get_bounds(&self) -> Bounds {
         let mut bounds = Bounds {
@@ -1083,5 +1125,3 @@ where
 
     Some(inner::<F, D>)
 }
-
-// TODO: implement rtcIntersect1Mp
