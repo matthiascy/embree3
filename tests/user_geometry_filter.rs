@@ -116,3 +116,89 @@ fn filter_runs_for_user_geometry_and_rejects() {
     );
     assert!(!hit_valid, "rejected hit must NOT be committed");
 }
+
+/// Shadow-ray analogue: a user-geometry occluder whose occluded callback runs
+/// the occlusion filter. When the filter rejects, the ray is NOT occluded.
+fn trace_sphere_occlusion_with_filter(reject: bool) -> (bool, usize) {
+    let device = common::device();
+    let mut scene = device.create_scene().unwrap();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_cb = calls.clone();
+
+    let mut sphere = common::user_sphere(&device);
+
+    sphere.set_occluded_function::<_, (), IntersectContext>(
+        move |args: &mut OccludedFunctionNArgs<'_, IntersectContext, ()>| {
+            for i in 0..args.len() {
+                if args.valid_n()[i] == 0 {
+                    continue; // skip inactive rays
+                }
+                let mut ray = args.ray(i);
+                let t = 1.5_f32;
+                if t > ray.tnear && t < ray.tfar {
+                    let mut hit = Hit {
+                        Ng_x: 0.0,
+                        Ng_y: 0.0,
+                        Ng_z: -1.0,
+                        u: 0.0,
+                        v: 0.0,
+                        primID: args.prim_id(),
+                        geomID: args.geom_id(),
+                        instID: [INVALID_ID], /* single-level, no instancing in this test
+                                               * Initialize hit properties */
+                    };
+                    ray.tfar = t; // candidate distance the filter will see
+                    if args.filter_occlusion(&mut ray, &mut hit) {
+                        args.set_occluded(i);
+                    }
+                }
+            }
+        },
+    );
+
+    sphere.set_occluded_filter_function::<_, (), IntersectContext>(
+        move |_ray, _hit, mut valid, _ctx, _user: Option<&()>| {
+            calls_cb.fetch_add(1, Ordering::SeqCst);
+            if reject {
+                valid[0] = 0;
+            }
+        },
+    );
+
+    let sphere = sphere.commit();
+    scene.attach_geometry(&sphere);
+    scene.commit();
+
+    common::clobber_stack();
+
+    let ray = embree3::Ray::segment([0.0, 0.0, -2.0], [0.0, 0.0, 1.0], 0.0, f32::INFINITY);
+    let mut ctx = IntersectContext::coherent();
+    let mut probe = ray;
+    let occluded = scene.occluded(&mut ctx, &mut probe);
+
+    (occluded, calls.load(Ordering::SeqCst))
+}
+
+#[test]
+fn occlusion_filter_runs_and_occludes() {
+    let (occluded, calls) = trace_sphere_occlusion_with_filter(false);
+    assert!(
+        calls >= 1,
+        "the occlusion filter must run via the user geometry"
+    );
+    assert!(occluded, "surviving occluder must mark the ray occluded");
+}
+
+#[test]
+fn occlusion_filter_runs_and_passes_through() {
+    let (occluded, calls) = trace_sphere_occlusion_with_filter(true);
+    assert!(
+        calls >= 1,
+        "the occlusion filter must run via the user geometry"
+    );
+    assert!(
+        !occluded,
+        "rejected occluder must NOT mark the ray occluded"
+    );
+}
