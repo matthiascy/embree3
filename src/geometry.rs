@@ -26,7 +26,7 @@ use crate::{
     buffer::required_layout_bytes, callback::ErasedFn, sys::*, AsIntersectContext, Bounds, Buffer,
     BufferData, BufferLayout, BufferSize, BufferSource, BufferUsage, BufferView, BufferViewMut,
     BuildQuality, Device, Error, Format, GeometryKind, Hit, HitN, QuaternionDecomposition, Ray,
-    RayHitN, RayN, Scene, SoAHit, SoARay, SubdivisionMode, UserData,
+    RayN, Scene, SoAHit, SoARay, SubdivisionMode, UserData,
 };
 
 use std::{

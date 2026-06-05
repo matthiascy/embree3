@@ -11,7 +11,7 @@ use std::sync::{
 
 use embree3::{
     Hit, IntersectContext, IntersectFunctionNArgs, OccludedFunctionNArgs, Ray4, RayHit4, SoAHit,
-    SoARay, INVALID_ID,
+    SoARay, ValidMask, INVALID_ID,
 };
 
 /// Builds a scene with a single user-geometry sphere, whose intersect callback
@@ -271,4 +271,97 @@ fn filter_rejecting_nearest_returns_farther_hit() {
         "committed hit must be the farther accepted one (t=2.5), got {}",
         ray_hit.ray.tfar
     );
+}
+
+#[test]
+fn packet_filter_intersectio_n_rejects_per_lane() {
+    let device = common::device();
+    let mut scene = device.create_scene().unwrap();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_cb = calls.clone();
+
+    let mut sphere = common::user_sphere(&device);
+
+    sphere.set_intersect_function::<_, (), IntersectContext>(
+        move |args: &mut IntersectFunctionNArgs<'_, IntersectContext, ()>| {
+            let n = args.len();
+            let t = 1.5f32;
+            let mut hits = vec![
+                Hit {
+                    primID: args.prim_id(),
+                    geomID: args.geom_id(),
+                    ..Default::default()
+                };
+                n
+            ];
+            let mut valid = vec![ValidMask::Valid as i32; n];
+            let mut cached_tfar = vec![0.0; n];
+            for i in 0..n {
+                let ray = args.ray(i);
+                cached_tfar[i] = ray.tfar;
+                if args.valid_n()[i] != ValidMask::Invalid && t > ray.tnear && t < ray.tfar {
+                    args.set_tfar(i, t); // candidate distance the filter will
+                                         // see
+                } else {
+                    valid[i] = ValidMask::Invalid as i32;
+                }
+            }
+            args.filter_intersection_n(&mut hits, &mut valid);
+            for i in 0..n {
+                if valid[i] != ValidMask::Invalid as i32 {
+                    let r = args.ray(i); // tfar == t
+                    args.commit_hit(i, &r, &hits[i]);
+                } else {
+                    args.set_tfar(i, cached_tfar[i]); // restore rejected /
+                                                      // inative lanes
+                }
+            }
+        },
+    );
+
+    sphere.set_intersect_filter_function::<_, (), IntersectContext>(
+        move |ray, _hit, mut valid, _ctx, _user: Option<&()>| {
+            calls_cb.fetch_add(1, Ordering::SeqCst);
+            for i in 0..ray.len() {
+                if ray.id(i) % 2 == 1 {
+                    valid[i] = 0; // reject odd-id lanes
+                }
+            }
+        },
+    );
+
+    let sphere = sphere.commit();
+    scene.attach_geometry(&sphere);
+    scene.commit();
+    common::clobber_stack();
+
+    // Four parallel rays down +z, all within the sphere's xy footprint; id = lane.
+    let origins = [
+        [-0.3, 0.0, -2.0],
+        [-0.1, 0.0, -2.0],
+        [0.1, 0.0, -2.0],
+        [0.3, 0.0, -2.0],
+    ];
+    let mut ray4 = Ray4::new(origins, [[0.0, 0.0, 1.0]; 4]);
+    for i in 0..4 {
+        ray4.set_id(i, i as u32);
+    }
+    let mut rh = RayHit4::new(ray4);
+    let valid = [-1i32; 4];
+    let mut ctx = IntersectContext::coherent();
+    scene.intersect4(&mut ctx, &mut rh, &valid);
+
+    assert!(
+        calls.load(Ordering::SeqCst) >= 1,
+        "the filter must run for the packet"
+    );
+    for i in 0..4 {
+        let hit = rh.hit.is_valid(i);
+        if i % 2 == 0 {
+            assert!(hit, "even-id lane {i} should hit (filter accepts)");
+        } else {
+            assert!(!hit, "odd-id lane {i} should be rejected by the filter");
+        }
+    }
 }
