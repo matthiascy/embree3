@@ -124,3 +124,69 @@ fn new_buffer_round_trips_and_get_buffer_reports_local() {
         other => panic!("expected a Local buffer source, got {other:?}"),
     }
 }
+
+#[test]
+fn typed_shared_slice_binds_a_hittable_triangle() {
+    // `set_shared_slice` derives `stride = size_of::<T>()` and `count =
+    // data.len()`, so callers bind a typed slice directly instead of byte-erasing
+    // + passing stride/count by hand. 16-byte vertices (`[f32; 4]`, 4th lane is
+    // padding read as `FLOAT3`) make each element SSE-tail-safe with no manual pad.
+    //
+    // `verts`/`idx` are declared before `scene`/`tri` so they outlive the
+    // geometry (the shared binding ties the geometry's `'buf` to the host data).
+    let device = common::device();
+    let verts: [[f32; 4]; 3] = [
+        [0.0, 0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+    ];
+    let idx: [[u32; 3]; 1] = [[0, 1, 2]];
+
+    let mut scene = device.create_scene().unwrap();
+    let mut tri = device.create_geometry(GeometryKind::TRIANGLE).unwrap();
+    tri.set_shared_slice::<[f32; 4]>(BufferUsage::VERTEX, 0, Format::FLOAT3, &verts)
+        .unwrap();
+    tri.set_shared_slice::<[u32; 3]>(BufferUsage::INDEX, 0, Format::UINT3, &idx)
+        .unwrap();
+    let tri = tri.commit();
+    scene.attach_geometry(&tri);
+    scene.commit();
+
+    assert!(
+        common::cast_center_ray(&scene).hit.is_valid(),
+        "typed shared-slice binding must produce a hittable triangle"
+    );
+}
+
+#[test]
+fn typed_managed_slice_binds_subrange() {
+    // `set_managed_slice` indexes a refcounted embree `Buffer` in **elements of
+    // T** (`stride = size_of::<T>()`), delegating to the byte-range managed
+    // binding. The geometry retains the buffer, so `buf` may drop after binding.
+    let device = common::device();
+    let mut scene = device.create_scene().unwrap();
+
+    let mut buf = device
+        .create_buffer(3 * std::mem::size_of::<[f32; 4]>())
+        .unwrap();
+    buf.mapped_range_mut::<_, [f32; 4]>(..).copy_from_slice(&[
+        [0.0, 0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+    ]);
+
+    let mut tri = device.create_geometry(GeometryKind::TRIANGLE).unwrap();
+    tri.set_managed_slice::<[f32; 4], _>(BufferUsage::VERTEX, 0, Format::FLOAT3, &buf, 0..3)
+        .unwrap();
+    tri.set_new_buffer::<[u32; 3]>(BufferUsage::INDEX, 0, Format::UINT3, 12, 1)
+        .unwrap()
+        .copy_from_slice(&[[0, 1, 2]]);
+    let tri = tri.commit();
+    scene.attach_geometry(&tri);
+    scene.commit();
+
+    assert!(
+        common::cast_center_ray(&scene).hit.is_valid(),
+        "typed managed-slice binding must produce a hittable triangle"
+    );
+}

@@ -377,6 +377,45 @@ impl<'buf> GeometryBuilder<'buf> {
         Ok(())
     }
 
+    /// Typed convenience for [`set_shared_buffer`](Self::set_shared_buffer):
+    /// bind a host slice `&'buf [T]` directly, deriving `stride =
+    /// size_of::<T>()` and `count = data.len()` instead of byte-erasing at
+    /// the call site.
+    ///
+    /// `format` stays explicit: it cannot be derived from `T` in general (e.g.
+    /// `[f32; 4]` could be `FLOAT3` *or* `FLOAT4`). `data` must outlive the
+    /// geometry (the `'buf` borrow enforces it). For a `VERTEX` buffer each
+    /// element must be readable up to a 16-byte boundary, so a tightly packed
+    /// `[f32; 3]` slice is rejected; use a 16-byte element type (e.g. `[f32;
+    /// 4]`) or the byte-level
+    /// [`set_shared_buffer`](Self::set_shared_buffer) with
+    /// trailing padding. Reach for
+    /// [`set_shared_buffer`](Self::set_shared_buffer) directly when you
+    /// need a custom `stride` (interleaved / over-aligned data)
+    /// or a `count` smaller than the slice.
+    pub fn set_shared_slice<T: BufferData>(
+        &mut self,
+        usage: BufferUsage,
+        slot: u32,
+        format: Format,
+        data: &'buf [T],
+    ) -> Result<(), Error> {
+        // SAFETY: `T: BufferData` is plain data with no padding-sensitivity, so
+        // viewing `&[T]` as its underlying bytes is sound; the byte slice borrows
+        // `data` for `'buf`, preserving the host-memory lifetime constraint.
+        let bytes: &'buf [u8] = unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
+        };
+        self.set_shared_buffer(
+            usage,
+            slot,
+            format,
+            bytes,
+            std::mem::size_of::<T>(),
+            data.len(),
+        )
+    }
+
     /// Binds a byte sub-range of a refcounted [`Buffer`]
     /// (`rtcSetGeometryBuffer`). The geometry **retains** the buffer, so
     /// this does not constrain the geometry's lifetime. `byte_range`'s
@@ -441,6 +480,53 @@ impl<'buf> GeometryBuilder<'buf> {
             },
         );
         Ok(())
+    }
+
+    /// Typed convenience for [`set_managed_buffer`](Self::set_managed_buffer):
+    /// bind a sub-range of a refcounted [`Buffer`] indexed in **elements of
+    /// `T`** (`stride = size_of::<T>()`) rather than bytes. An unbounded end
+    /// covers every whole `T` that fits in the buffer.
+    ///
+    /// Like [`set_managed_buffer`](Self::set_managed_buffer), the geometry
+    /// **retains** the buffer, so this does not constrain the geometry's
+    /// lifetime. `format` stays explicit (see
+    /// [`set_shared_slice`](Self::set_shared_slice) for why). Reach for the
+    /// byte-level [`set_managed_buffer`](Self::set_managed_buffer) when you
+    /// need a `stride` different from `size_of::<T>()`.
+    pub fn set_managed_slice<T: BufferData, S: RangeBounds<usize>>(
+        &mut self,
+        usage: BufferUsage,
+        slot: u32,
+        format: Format,
+        buffer: &Buffer,
+        elem_range: S,
+    ) -> Result<(), Error> {
+        let stride = std::mem::size_of::<T>();
+        if stride == 0 {
+            return Err(Error::INVALID_ARGUMENT);
+        }
+        let start = match elem_range.start_bound() {
+            Bound::Included(&n) => n,
+            Bound::Excluded(&n) => n + 1,
+            Bound::Unbounded => 0,
+        };
+        let end = match elem_range.end_bound() {
+            Bound::Included(&n) => n + 1,
+            Bound::Excluded(&n) => n,
+            Bound::Unbounded => buffer.size.get() / stride,
+        };
+        let count = end.checked_sub(start).ok_or(Error::INVALID_ARGUMENT)?;
+        let byte_offset = start.checked_mul(stride).ok_or(Error::INVALID_ARGUMENT)?;
+        let byte_end = end.checked_mul(stride).ok_or(Error::INVALID_ARGUMENT)?;
+        self.set_managed_buffer(
+            usage,
+            slot,
+            format,
+            buffer,
+            byte_offset..byte_end,
+            stride,
+            count,
+        )
     }
 
     /// Creates a new [`Buffer`](`crate::Buffer`) and binds it as a specific

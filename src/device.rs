@@ -456,9 +456,9 @@ pub fn enable_ftz_and_daz() {
 /// `log` cargo feature is enabled, and otherwise writes to stderr.
 fn default_error_reporter(error: RTCError, msg: &str) {
     #[cfg(feature = "log")]
-    log::error!("embree: {:?} — {}", error, msg);
+    log::error!("embree: {:?}: {}", error, msg);
     #[cfg(not(feature = "log"))]
-    eprintln!("[embree] {:?} — {}", error, msg);
+    eprintln!("[embree] {:?}: {}", error, msg);
 }
 
 /// Helper function to create a new Embree device.
