@@ -202,3 +202,73 @@ fn occlusion_filter_runs_and_passes_through() {
         "rejected occluder must NOT mark the ray occluded"
     );
 }
+
+#[test]
+fn filter_rejecting_nearest_returns_farther_hit() {
+    let device = common::device();
+    let mut scene = device.create_scene().unwrap();
+
+    let seen = Arc::new(AtomicUsize::new(0));
+    let seen_cb = seen.clone();
+
+    let mut sphere = common::user_sphere(&device);
+
+    sphere.set_intersect_function::<_, (), IntersectContext>(
+        move |args: &mut IntersectFunctionNArgs<'_, IntersectContext, ()>| {
+            for i in 0..args.len() {
+                if args.valid_n()[i] == 0 {
+                    continue;
+                }
+                for &t in &[1.5_f32, 2.5_f32] {
+                    let mut ray = args.ray(i);
+                    if t > ray.tnear && t < ray.tfar {
+                        let mut hit = Hit {
+                            Ng_x: 0.0,
+                            Ng_y: 0.0,
+                            Ng_z: -1.0,
+                            u: 0.0,
+                            v: 0.0,
+                            primID: args.prim_id(),
+                            geomID: args.geom_id(),
+                            instID: [INVALID_ID],
+                        };
+                        ray.tfar = t;
+                        if args.filter_intersection(&mut ray, &mut hit) {
+                            args.commit_hit(i, &ray, &hit);
+                        }
+                    }
+                }
+            }
+        },
+    );
+
+    // Reject exactly the first hit the filter is shown; accept thereafter.
+    sphere.set_intersect_filter_function::<_, (), IntersectContext>(
+        move |_ray, _hit, mut valid, _ctx, _user: Option<&()>| {
+            if seen_cb.fetch_add(1, Ordering::SeqCst) == 0 {
+                valid[0] = 0; // reject the first (nearer) hit
+            }
+        },
+    );
+
+    let sphere = sphere.commit();
+    scene.attach_geometry(&sphere);
+    scene.commit();
+    common::clobber_stack();
+
+    let ray = embree3::Ray::segment([0.0, 0.0, -2.0], [0.0, 0.0, 1.0], 0.0, f32::INFINITY);
+    let mut ctx = IntersectContext::coherent();
+    let mut ray_hit = embree3::RayHit::from(ray);
+    scene.intersect(&mut ctx, &mut ray_hit);
+
+    assert!(
+        ray_hit.hit.is_valid(),
+        "the farther hit should be committed"
+    );
+    // ray.tfar is the committed distance; the near hit (1.5) was rejected.
+    assert!(
+        (ray_hit.ray.tfar - 2.5).abs() < 1e-4,
+        "committed hit must be the farther accepted one (t=2.5), got {}",
+        ray_hit.ray.tfar
+    );
+}
