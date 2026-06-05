@@ -1,12 +1,11 @@
 use crate::{
     callback::ErasedFn, AsIntersectContext, Bounds, BufferData, BufferUsage, BuildQuality, Error,
-    Format, PointQuery, PointQueryContext, Ray, Ray16, Ray8, RayHit, RayHit16, RayHit8, RayHitNp,
-    RayHitPacket, RayPacket, SceneFlags, UserData,
+    Format, PointQuery, PointQuery16, PointQuery4, PointQuery8, PointQueryContext, Ray, Ray16,
+    Ray8, RayHit, RayHit16, RayHit8, RayHitNp, RayHitPacket, RayPacket, SceneFlags,
 };
 use std::{
-    any::TypeId,
     collections::HashMap,
-    mem, ptr,
+    mem,
     sync::{Arc, Mutex},
 };
 
@@ -55,6 +54,49 @@ impl<'a> Drop for Scene<'a> {
 // `&mut self`.
 unsafe impl<'a> Sync for Scene<'a> {}
 unsafe impl<'a> Send for Scene<'a> {}
+
+/// Emits a `point_query{4,8,16}` method. Each lane is an independent query with
+/// its own accumulator in `per_lane`; the closure is shared but routed per-lane
+/// through the `userPtr` array. See [`Scene::point_query`] for the single-query
+/// form and the callback contract.
+macro_rules! impl_point_query_packet {
+    ($(#[$doc:meta])* $name:ident, $query:ty, $n:literal, $ffi:ident) => {
+        $(#[$doc])*
+        pub fn $name<F, D>(
+            &self,
+            valid: &[i32; $n],
+            queries: &mut $query,
+            context: &mut PointQueryContext,
+            mut query_fn: F,
+            per_lane: &mut [D; $n],
+        ) -> bool
+        where
+            F: FnMut(&mut PointQuery, &mut PointQueryContext, &mut D, u32, u32, f32) -> bool,
+        {
+            // One callback record per lane: the closure pointer is shared, the
+            // `data` pointer is the lane's own accumulator. The records, `query_fn`,
+            // and `per_lane` all outlive the synchronous query call below.
+            let mut cbdata: [PointQueryCallbackData; $n] = std::array::from_fn(|i| {
+                PointQueryCallbackData {
+                    scene_closure: &mut query_fn as *mut F as *mut _,
+                    data: &mut per_lane[i] as *mut D as *mut _,
+                }
+            });
+            let mut user_ptrs: [*mut std::os::raw::c_void; $n] =
+                std::array::from_fn(|i| &mut cbdata[i] as *mut PointQueryCallbackData as *mut _);
+            unsafe {
+                $ffi(
+                    valid.as_ptr(),
+                    self.handle,
+                    queries as *mut _,
+                    context as *mut _,
+                    point_query_function_n::<F, D>(),
+                    user_ptrs.as_mut_ptr(),
+                )
+            }
+        }
+    };
+}
 
 impl<'a> Scene<'a> {
     /// Creates a new scene with the given device.
@@ -371,23 +413,19 @@ impl<'a> Scene<'a> {
     ///   transformation information of the instancing hierarchy if
     ///   (multilevel-)instancing is used. See [`PointQueryContext`].
     ///
-    /// * `query_fn` - The user defined callback function. For each primitive
-    ///   that intersects the query domain, the callback function is called, in
-    ///   which distance computations to the primitive can be implemented. The
-    ///   user will be provided with the primitive ID and geometry ID of the
-    ///   according primitive, however, the geometry information has to be
-    ///   determined manually. The callback function can be `None`, in which
-    ///   case the callback function is not invoked.
+    /// * `query_fn` - Invoked for each primitive whose BVH leaf intersects the
+    ///   query domain, with `(query, context, primID, geomID,
+    ///   similarityScale)`. It captures its own accumulator (there is no
+    ///   separate `data` parameter) and returns `true` if it shrank the query
+    ///   radius (so embree updates traversal). Point queries run synchronously
+    ///   on the calling thread, so the closure carries no
+    ///   `Send`/`Sync`/`'static` bound. For per-geometry logic, branch on
+    ///   `geomID` inside the closure. A callback is mandatory: there is no
+    ///   callback-less form (it would do nothing), and no separate per-geometry
+    ///   point-query function (use `geomID` dispatch here instead).
     ///
-    /// * `user_data` - The user defined data that is passed to the callback.
-    ///
-    /// A callback function can still get attached to a specific [`Geometry`]
-    /// object using
-    /// [`GeometryBuilder::set_point_query_function`](crate::GeometryBuilder::set_point_query_function).
-    /// If a callback function is attached to a geometry, and (a potentially
-    /// different) callback function is passed to this function, both
-    /// functions will be called for the primitives of the according
-    /// geometries.
+    /// Returns embree's `rtcPointQuery` result: `true` if any callback reported
+    /// a change to the query.
     ///
     /// The query radius can be decreased inside the callback function, which
     /// allows to efficiently cull parts of the scene during BVH traversal.
@@ -413,42 +451,49 @@ impl<'a> Scene<'a> {
     /// Currently, all primitive types are supported by the point query API
     /// except of points, curves and subdivision surfaces.
     ///
-    /// See **closet_point** in examples folder for an example of this.
-    pub fn point_query<F, D>(
+    /// See the *ClosestPoint* tutorial in embree's examples for a reference
+    /// implementation.
+    pub fn point_query<F>(
         &self,
         query: &mut PointQuery,
         context: &mut PointQueryContext,
-        query_fn: Option<F>,
-        mut user_data: Option<D>,
-    ) where
-        D: UserData,
-        F: FnMut(&mut PointQuery, &mut PointQueryContext, Option<&mut D>, u32, u32, f32) -> bool,
+        mut query_fn: F,
+    ) -> bool
+    where
+        F: FnMut(&mut PointQuery, &mut PointQueryContext, u32, u32, f32) -> bool,
     {
-        let mut query_fn = query_fn;
-        let mut user = PointQueryCallbackData {
-            scene_closure: query_fn
-                .as_mut()
-                .map_or(ptr::null_mut(), |f| f as *mut F as *mut _),
-            data: user_data
-                .as_mut()
-                .map_or(ptr::null_mut(), |d| d as *mut D as *mut _),
-
-            type_id: TypeId::of::<D>(),
-        };
         unsafe {
             rtcPointQuery(
                 self.handle,
                 query as *mut _,
                 context as *mut _,
-                if query_fn.is_some() {
-                    point_query_function::<F, D>()
-                } else {
-                    None
-                },
-                &mut user as *mut PointQueryCallbackData as *mut _,
-            );
+                point_query_function::<F>(),
+                &mut query_fn as *mut F as *mut _,
+            )
         }
     }
+
+    impl_point_query_packet!(
+        /// Runs 4 independent point queries at once (`rtcPointQuery4`).
+        ///
+        /// Each lane `i` is its own query (`queries.x[i]`, `radius[i]`, ...) with
+        /// its own accumulator `per_lane[i]`; `valid[i] == 0` skips a lane. The
+        /// closure runs per active lane with that lane's `&mut D`. See
+        /// [`point_query`](Self::point_query) for the callback contract.
+        point_query4, PointQuery4, 4, rtcPointQuery4
+    );
+
+    impl_point_query_packet!(
+        /// Runs 8 independent point queries at once (`rtcPointQuery8`). See
+        /// [`point_query4`](Self::point_query4).
+        point_query8, PointQuery8, 8, rtcPointQuery8
+    );
+
+    impl_point_query_packet!(
+        /// Runs 16 independent point queries at once (`rtcPointQuery16`). See
+        /// [`point_query4`](Self::point_query4).
+        point_query16, PointQuery16, 16, rtcPointQuery16
+    );
 
     /// Set the build quality of the scene. See [`BuildQuality`] for all
     /// possible values.
@@ -1051,23 +1096,15 @@ impl<'a> Scene<'a> {
     }
 }
 
-/// User data for callback of [`Scene::point_query`] and
-/// [`GeometryBuilder::set_point_query_function`](crate::GeometryBuilder::set_point_query_function).
+/// User data for the packet `point_query4/8/16` callbacks: a shared closure
+/// pointer plus the lane's own `data` accumulator. The cast back to the
+/// concrete `F`/`D` is sound by construction (the trampoline is monomorphized
+/// over the same types the binder used), so no runtime `TypeId` guard is
+/// needed.
 #[derive(Debug)]
 pub(crate) struct PointQueryCallbackData {
     pub scene_closure: *mut std::os::raw::c_void,
     pub data: *mut std::os::raw::c_void,
-    pub type_id: TypeId,
-}
-
-impl Default for PointQueryCallbackData {
-    fn default() -> Self {
-        Self {
-            scene_closure: ptr::null_mut(),
-            data: ptr::null_mut(),
-            type_id: TypeId::of::<()>(),
-        }
-    }
 }
 
 /// Helper function to convert a Rust closure to `RTCProgressMonitorFunction`
@@ -1089,38 +1126,52 @@ where
 
 /// Helper function to convert a Rust closure to `RTCPointQueryFunction`
 /// callback.
-fn point_query_function<F, D>() -> RTCPointQueryFunction
+fn point_query_function<F>() -> RTCPointQueryFunction
 where
-    D: UserData,
-    F: FnMut(&mut PointQuery, &mut PointQueryContext, Option<&mut D>, u32, u32, f32) -> bool,
+    F: FnMut(&mut PointQuery, &mut PointQueryContext, u32, u32, f32) -> bool,
+{
+    unsafe extern "C" fn inner<F>(args: *mut RTCPointQueryFunctionArguments) -> bool
+    where
+        F: FnMut(&mut PointQuery, &mut PointQueryContext, u32, u32, f32) -> bool,
+    {
+        // For the single query, `userPtr` is the closure itself (it captures its
+        // own state, so there is no separate callback record).
+        let cb = &mut *((*args).userPtr as *mut F);
+        cb(
+            &mut *(*args).query,
+            &mut *(*args).context,
+            (*args).primID,
+            (*args).geomID,
+            (*args).similarityScale,
+        )
+    }
+
+    Some(inner::<F>)
+}
+
+/// Packet-query variant of [`point_query_function`]: each lane's `userPtr`
+/// points at its own [`PointQueryCallbackData`] (shared closure pointer,
+/// per-lane `data`), so the closure receives the lane's own `&mut D`.
+fn point_query_function_n<F, D>() -> RTCPointQueryFunction
+where
+    F: FnMut(&mut PointQuery, &mut PointQueryContext, &mut D, u32, u32, f32) -> bool,
 {
     unsafe extern "C" fn inner<F, D>(args: *mut RTCPointQueryFunctionArguments) -> bool
     where
-        D: UserData,
-        F: FnMut(&mut PointQuery, &mut PointQueryContext, Option<&mut D>, u32, u32, f32) -> bool,
+        F: FnMut(&mut PointQuery, &mut PointQueryContext, &mut D, u32, u32, f32) -> bool,
     {
-        let user_data = &mut *((*args).userPtr as *mut PointQueryCallbackData);
-        let cb_ptr = user_data.scene_closure as *mut F;
-        if !cb_ptr.is_null() {
-            let data = {
-                if user_data.data.is_null() || user_data.type_id != TypeId::of::<D>() {
-                    None
-                } else {
-                    Some(&mut *(user_data.data as *mut D))
-                }
-            };
-            let cb = &mut *cb_ptr;
-            cb(
-                &mut *(*args).query,
-                &mut *(*args).context,
-                data,
-                (*args).primID,
-                (*args).geomID,
-                (*args).similarityScale,
-            )
-        } else {
-            false
-        }
+        let cbdata = &mut *((*args).userPtr as *mut PointQueryCallbackData);
+        // `scene_closure` (shared `F`) and `data` (this lane's `D`) are always
+        // bound by `point_query{4,8,16}`; the casts are sound by monomorphization.
+        let cb = &mut *(cbdata.scene_closure as *mut F);
+        cb(
+            &mut *(*args).query,
+            &mut *(*args).context,
+            &mut *(cbdata.data as *mut D),
+            (*args).primID,
+            (*args).geomID,
+            (*args).similarityScale,
+        )
     }
 
     Some(inner::<F, D>)

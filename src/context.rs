@@ -179,4 +179,28 @@ where
 /// (3×3 matrix plus translation) and therefore the last column is ignored.
 pub type PointQueryContext = RTCPointQueryContext;
 
-// TODO: PointQueryContext::new
+impl PointQueryContext {
+    /// Creates a point-query context with an empty instance stack.
+    ///
+    /// Equivalent to embree's inline `rtcInitPointQueryContext` (which is a
+    /// header helper, not an exported symbol, so it is reproduced here):
+    /// `instStackSize = 0` and the instance ID stack reset to
+    /// [`INVALID_ID`](crate::INVALID_ID). The transform stacks are left zeroed;
+    /// they are only read once instances push onto the stack during traversal.
+    pub fn new() -> Self {
+        // Size every stack off the binding's instance-level count so this stays
+        // correct if `sys.rs` is regenerated against an embree built with
+        // multi-level instancing.
+        const LEVELS: usize = RTC_MAX_INSTANCE_LEVEL_COUNT as usize;
+        Self {
+            world2inst: [[0.0; 16]; LEVELS],
+            inst2world: [[0.0; 16]; LEVELS],
+            instID: [crate::INVALID_ID; LEVELS],
+            instStackSize: 0,
+        }
+    }
+}
+
+impl Default for PointQueryContext {
+    fn default() -> Self { Self::new() }
+}

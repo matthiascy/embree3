@@ -1,13 +1,13 @@
-//! Proves Scene::point_query passes a usable pointer to its callback.
-//! `scene.rs` currently hands embree `point_query_user_data.data` while the
-//! trampoline casts userPtr back to `*mut PointQueryCallbackData` (type
-//! confusion).
+//! Proves `Scene::point_query` invokes its callback with live captured state.
+//! The single query takes no `data` parameter (the closure captures its own
+//! accumulator) and carries no `Send`/`Sync`/`'static` bound, so a non-`Send`
+//! `Rc<RefCell<_>>` capture is accepted and observed after the call.
 
 mod common;
 
 use std::{cell::RefCell, rc::Rc};
 
-use embree3::{PointQuery, PointQueryContext, INVALID_ID};
+use embree3::{PointQuery, PointQueryContext};
 
 #[test]
 fn point_query_invokes_callback_with_live_state() {
@@ -27,35 +27,13 @@ fn point_query_invokes_callback_with_live_state() {
         time: 0.0,
         radius: 1.0,
     };
-    // `RTCPointQueryContext` derives no `Default`, and the embree initializer
-    // (`rtcInitPointQueryContext`) is not wrapped. Construct it explicitly: an
-    // empty instance stack with the no-instance sentinel. The transform
-    // matrices are only read when instances are pushed, so zeros are fine for
-    // this non-instanced scene.
-    let mut ctx = PointQueryContext {
-        world2inst: [[0.0; 16]; 1],
-        inst2world: [[0.0; 16]; 1],
-        instID: [INVALID_ID; 1],
-        instStackSize: 0,
-    };
+    let mut ctx = PointQueryContext::new();
 
     common::clobber_stack();
-    scene.point_query::<_, ()>(
-        &mut query,
-        &mut ctx,
-        Some(
-            |_q: &mut PointQuery,
-             _c: &mut PointQueryContext,
-             _d: Option<&mut ()>,
-             _prim,
-             _geom,
-             _s| {
-                *ran_in_cb.borrow_mut() = true;
-                false
-            },
-        ),
-        None,
-    );
+    scene.point_query(&mut query, &mut ctx, |_q, _c, _prim, _geom, _s| {
+        *ran_in_cb.borrow_mut() = true;
+        false
+    });
 
     assert!(
         *ran.borrow(),

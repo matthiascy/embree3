@@ -282,6 +282,13 @@ impl Bounds {
 /// See [`Scene::point_query`] for more information.
 pub type PointQuery = sys::RTCPointQuery;
 
+/// A SoA packet of 4 point queries (see [`Scene::point_query4`]).
+pub type PointQuery4 = sys::RTCPointQuery4;
+/// A SoA packet of 8 point queries (see [`Scene::point_query8`]).
+pub type PointQuery8 = sys::RTCPointQuery8;
+/// A SoA packet of 16 point queries (see [`Scene::point_query16`]).
+pub type PointQuery16 = sys::RTCPointQuery16;
+
 /// Primitives that can be used to build a BVH.
 pub type BuildPrimitive = sys::RTCBuildPrimitive;
 
