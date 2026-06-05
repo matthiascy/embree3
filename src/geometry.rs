@@ -266,7 +266,7 @@ impl<'buf> GeometryShared<'buf> {
 ///
 /// Depending on the geometry type, different buffers must be bound (typically
 /// a vertex and an index buffer) using
-/// [`set_buffer`](GeometryBuilder::set_buffer) or
+/// [`set_managed_buffer`](GeometryBuilder::set_managed_buffer) or
 /// [`set_new_buffer`](GeometryBuilder::set_new_buffer). The primitive and
 /// vertex counts are usually inferred from the bound buffer sizes.
 ///
@@ -749,7 +749,8 @@ impl<'buf> GeometryBuilder<'buf> {
     ///
     /// When performing ray queries using [`Scene::intersect`], it is
     /// *guaranteed* that the packet size is 1 when the callback is invoked.
-    /// When performing ray queries using the [`Scene::intersect4/8/16`]
+    /// When performing ray queries using the
+    /// [`Scene::intersect4`]/[`Scene::intersect8`]/[`Scene::intersect16`]
     /// functions, it is not generally guaranteed that the ray packet size
     /// (and order of rays inside the packet) passed to the callback matches
     /// the initial ray packet. However, under some circumstances these
@@ -1266,47 +1267,90 @@ impl<'buf> GeometryBuilder<'buf> {
     /// Unregister the callback function by calling
     /// [`GeometryBuilder::unset_intersect_function`].
     ///
+    /// # The callback
     ///
-    /// # Arguments
+    /// The closure receives a single
+    /// [`&mut IntersectFunctionNArgs<C, D>`](IntersectFunctionNArgs) carrying
+    /// the ray packet, validity mask, intersection context,
+    /// geometry/primitive IDs, and per-callback user data. Its task is to
+    /// intersect each **active** lane (`args.valid_n()[i] != 0`) of the
+    /// packet against the user primitive `args.prim_id()`, and commit the
+    /// closest hit found within each lane's `tnear..tfar` range. Lanes the
+    /// primitive misses are left untouched.
     ///
-    /// - `intersect`: The callback function to register. The task of the
-    ///   callback function is to intersect each active ray from the ray packet
-    ///   with the specified user primitive. If the user-defined primitive is
-    ///   missed by a ray of the ray packet, the function should return without
-    ///   modifying the ray or hit. If an intersection of the user-defined
-    ///   primitive with the ray is found in the range `tnear` to `tfar`, it
-    ///   should update the hit distance of the ray (`tfar` member) and the
-    ///   hit(`u`, `v`, `instID`, `geomID`, `primID` members). In particular,
-    ///   the currently intersected instance is stored in the `instID` field of
-    ///   the intersection context, which must be deep-copied into the `instID`
-    ///   member of the hit structure.
+    /// The packet's `hit` data is **write-only** scratch. The ray data is
+    /// valid; in particular each lane's `tfar` is the current closest-hit
+    /// distance.
     ///
-    ///   The callback function gets passed a number of arguments:
-    ///     - the ray hit packet of variable size N (see [`RayHitN`]); it
-    ///       contains valid data, in particular the `tfar` value is the current
-    ///       closest hit distance found. All data inside the `hit` component of
-    ///       the ray hit structure are undefined and should **NOT** be read by
-    ///       the function.
-    ///     - the valid masks for each ray in the packet (see [`ValidityN`])
-    ///     - a mutable reference to the intersection context (see
-    ///       [`IntersectContext`](`crate::IntersectContext`) and
-    ///       [`IntersectContextExt`](`crate::IntersectContextExt`))
-    ///     - the geometry ID of the geometry to intersect
-    ///     - the primitive ID of the primitive to intersect
-    ///     - a shared reference to the user data of the geometry (if any); the
-    ///       user data is bound per callback via this setter's `_owned` /
-    ///       `_borrowed` variants
+    /// Per lane `i` (the filter primitive is single-ray, so loop the packet):
     ///
-    /// The ray component of the ray hit structure contains valid data, in
-    /// particular the tfar value is the current closest hit distance found.
-    /// All data inside the hit component of the [`RayHitN`] structure are
-    /// undefined and should **NOT** be *read* by the function (writing is ok).
+    /// 1. Gather the lane's ray with
+    ///    [`args.ray(i)`](IntersectFunctionNArgs::ray).
+    /// 2. Run your ray/primitive test; for a hit, build a fully-initialized
+    ///    [`Hit`] (`Ng_*`, `u`, `v`, `geomID`, `primID`, and `instID`
+    ///    deep-copied from the context's instance stack) and set `ray.tfar` to
+    ///    the candidate distance.
+    /// 3. If filtering is desired, run the filter chain with
+    ///    [`args.filter_intersection(&mut ray, &mut
+    ///    hit)`](IntersectFunctionNArgs::filter_intersection). It invokes the
+    ///    geometry filter
+    ///    ([`set_intersect_filter_function`](Self::set_intersect_filter_function))
+    ///    **and** the context filter, returning `false` if the hit was
+    ///    rejected. For *built-in* geometry embree runs the filter
+    ///    automatically; for *user* geometry the intersector must call it,
+    ///    because embree never sees the user-computed hit. To filter a whole
+    ///    packet in one call instead, see
+    ///    [`filter_intersection_n`](IntersectFunctionNArgs::filter_intersection_n).
+    /// 4. Commit a surviving hit with [`args.commit_hit(i, &ray,
+    ///    &hit)`](IntersectFunctionNArgs::commit_hit).
     ///
-    /// As a primitive might have multiple intersections with a ray, the
-    /// intersection filter function needs to be invoked by the user
-    /// geometry intersection callback for each encountered intersection, if
-    /// filtering of intersections is desired. This can be achieved through
-    /// the [`GeometryBuilder::set_intersect_filter_function`].
+    /// A primitive may be hit more than once per ray (e.g. a sphere's front and
+    /// back faces): repeat steps 1–4 for each candidate. A rejected candidate
+    /// leaves the packet untouched, so the next one can still be accepted.
+    ///
+    /// Per-callback user data is bound via this setter's `_owned` / `_borrowed`
+    /// variants and read back through
+    /// [`args.user_data()`](IntersectFunctionNArgs::user_data).
+    ///
+    /// # Examples
+    ///
+    /// A user geometry that reports a hit and runs it through the filter chain:
+    ///
+    /// ```no_run
+    /// # use embree3::{
+    /// #     Device, GeometryKind, Hit, IntersectContext, IntersectFunctionNArgs, INVALID_ID,
+    /// # };
+    /// let device = Device::new().unwrap();
+    /// let mut geom = device.create_geometry(GeometryKind::USER).unwrap();
+    /// geom.set_primitive_count(1);
+    /// geom.set_intersect_function::<_, (), IntersectContext>(
+    ///     |args: &mut IntersectFunctionNArgs<'_, IntersectContext, ()>| {
+    ///         for i in 0..args.len() {
+    ///             if args.valid_n()[i] == 0 {
+    ///                 continue; // skip inactive lanes
+    ///             }
+    ///             let mut ray = args.ray(i);
+    ///             let t = 1.0_f32; // distance from your ray/primitive test
+    ///             if t > ray.tnear && t < ray.tfar {
+    ///                 let mut hit = Hit {
+    ///                     Ng_x: 0.0,
+    ///                     Ng_y: 0.0,
+    ///                     Ng_z: 1.0,
+    ///                     u: 0.0,
+    ///                     v: 0.0,
+    ///                     primID: args.prim_id(),
+    ///                     geomID: args.geom_id(),
+    ///                     instID: [INVALID_ID],
+    ///                 };
+    ///                 ray.tfar = t;
+    ///                 if args.filter_intersection(&mut ray, &mut hit) {
+    ///                     args.commit_hit(i, &ray, &hit);
+    ///                 }
+    ///             }
+    ///         }
+    ///     },
+    /// );
+    /// ```
     ///
     /// - Within the user geometry intersect function, it is safe to trace new
     ///   rays and create new scenes and geometries.
@@ -1438,23 +1482,35 @@ impl<'buf> GeometryBuilder<'buf> {
     /// Similar to [`GeometryBuilder::set_intersect_function`], but for
     /// occlusion queries.
     ///
-    /// # Arguments
+    /// # The callback
     ///
-    /// - `occluded`: The callback function to register, which is invoked by
-    ///   occlusion queries to test whether the rays of a packet of variable
-    ///   size are occluded by a user-defined primitive.  The callback function
-    ///   gets passed a number of arguments:
+    /// The closure receives a single
+    /// [`&mut OccludedFunctionNArgs<C, D>`](OccludedFunctionNArgs) carrying the
+    /// ray packet, validity mask, intersection context, geometry/primitive IDs,
+    /// and per-callback user data. For each **active** lane
+    /// (`args.valid_n()[i] != 0`) it tests whether the user primitive
+    /// `args.prim_id()` occludes the ray, and marks the lanes that are
+    /// occluded.
     ///
-    ///   - the ray packet of variable size N (see [`RayN`])
-    ///   - the valid masks for each ray in the packet (see [`ValidityN`])
-    ///   - a mutable reference to the intersection context (see
-    ///     [`IntersectContext`](`crate::IntersectContext`) and
-    ///     [`IntersectContextExt`](`crate::IntersectContextExt`))
-    ///   - the geometry ID of the geometry to intersect
-    ///   - the primitive ID of the primitive to intersect
-    ///   - a shared reference to the user data of the geometry (if any); the
-    ///     user data is bound per callback via this setter's `_owned` /
-    ///     `_borrowed` variants
+    /// Per lane `i` (single-ray filter primitive, so loop the packet):
+    ///
+    /// 1. Gather the lane's ray with
+    ///    [`args.ray(i)`](OccludedFunctionNArgs::ray).
+    /// 2. Run your ray/primitive test; for an occluding hit within
+    ///    `tnear..tfar`, build a fully-initialized [`Hit`] and set `ray.tfar`
+    ///    to its distance.
+    /// 3. Optionally run the occlusion filter chain with
+    ///    [`args.filter_occlusion(&mut ray, &mut
+    ///    hit)`](OccludedFunctionNArgs::filter_occlusion) which returns `false`
+    ///    if the occluder was rejected.
+    /// 4. For a surviving occluder, mark the lane with
+    ///    [`args.set_occluded(i)`](OccludedFunctionNArgs::set_occluded) (embree
+    ///    signals occlusion by setting the ray's `tfar` to `-inf`).
+    ///
+    /// Whole-packet filtering is available via
+    /// [`filter_occlusion_n`](OccludedFunctionNArgs::filter_occlusion_n). See
+    /// [`set_intersect_function`](Self::set_intersect_function) for the
+    /// analogous intersect callback and a worked example.
     ///
     /// # Thread safety
     ///
@@ -1736,7 +1792,7 @@ impl<'buf> GeometryBuilder<'buf> {
     ///
     ///   The function is called with the following parameters:
     ///
-    ///   * `geometry`: The raw geometry handle [`sys::RTCGeometry`].
+    ///   * `geometry`: The raw geometry handle [`crate::sys::RTCGeometry`].
     ///   * `vertices`: The information about the vertices to displace. See
     ///     [`Vertices`].
     ///   * `prim_id`: The ID of the primitive that contains the vertices to
@@ -2210,8 +2266,8 @@ impl<'buf> Geometry<'buf> {
     ///
     /// Similar to [`Geometry::interpolate`], but performs N many interpolations
     /// at once. It additionally gets an array of u/v coordinates
-    /// [`InterpolateNInput::u/v`]and a valid mask
-    /// [`InterpolateNInput::valid`] that specifies which of these
+    /// ([`InterpolateNInput::u`]/[`InterpolateNInput::v`]) and a valid mask
+    /// ([`InterpolateNInput::valid`]) that specifies which of these
     /// coordinates are valid. The valid mask points to `n` integers, and a
     /// value of -1 denotes valid and 0 invalid.
     ///
@@ -2792,6 +2848,24 @@ impl<'a, C: AsIntersectContext, D: UserData> IntersectFunctionNArgs<'a, C, D> {
         hits.set_inst_id(i, hit.instID[0]);
     }
 
+    /// Convenience: [`filter_intersection`](Self::filter_intersection) then, on
+    /// survival, [`commit_hit`](Self::commit_hit).
+    ///
+    /// Runs the candidate (`ray`, `hit`) through the geometry's intersection
+    /// filter and the context filter; if it survives, commits it to lane `i`.
+    /// Returns `true` if the hit was committed, `false` if the filter rejected
+    /// it. `ray.tfar` must already be set to the candidate distance and `hit`
+    /// fully initialized (see
+    /// [`filter_intersection`](Self::filter_intersection)).
+    pub fn filter_and_commit_hit(&mut self, i: usize, ray: &mut Ray, hit: &mut Hit) -> bool {
+        if self.filter_intersection(ray, hit) {
+            self.commit_hit(i, ray, hit);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Set lane `i`'s packet-ray `tfar` (to a candidate distance before a
     /// packet filter, or to restore it after a rejection).
     pub fn set_tfar(&mut self, i: usize, tfar: f32) {
@@ -2981,6 +3055,22 @@ impl<'a, C: AsIntersectContext, D: UserData> OccludedFunctionNArgs<'a, C, D> {
         debug_assert!(i < self.len(), "occluded index out of bounds");
         let mut rays = self.rays();
         rays.set_tfar(i, f32::NEG_INFINITY);
+    }
+
+    /// Convenience: [`filter_occlusion`](Self::filter_occlusion) then, on
+    /// survival, [`set_occluded`](Self::set_occluded).
+    ///
+    /// Runs the candidate occluder (`ray`, `hit`) through the geometry's
+    /// occlusion filter and the context filter; if it survives, marks lane `i`
+    /// occluded. Returns `true` if the lane was marked occluded, `false` if the
+    /// filter rejected the occluder.
+    pub fn filter_and_set_occluded(&mut self, i: usize, ray: &mut Ray, hit: &mut Hit) -> bool {
+        if self.filter_occlusion(ray, hit) {
+            self.set_occluded(i);
+            true
+        } else {
+            false
+        }
     }
 
     /// Set lane `i`'s packet-ray `tfar` (candidate distance before a packet

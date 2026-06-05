@@ -274,7 +274,7 @@ fn filter_rejecting_nearest_returns_farther_hit() {
 }
 
 #[test]
-fn packet_filter_intersectio_n_rejects_per_lane() {
+fn packet_filter_intersection_n_rejects_per_lane() {
     let device = common::device();
     let mut scene = device.create_scene().unwrap();
 

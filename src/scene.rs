@@ -554,7 +554,7 @@ impl<'a> Scene<'a> {
     /// intersection. Further, the pointer to the intersection context is
     /// propagated to callback functions invoked during traversal and can
     /// thus be used to extend the ray with additional data. See
-    /// [`IntersectContext`] for more information.
+    /// [`IntersectContext`](crate::IntersectContext) for more information.
     ///
     /// # Arguments
     ///
@@ -563,7 +563,8 @@ impl<'a> Scene<'a> {
     ///   to be invoked for every intersection. Further, the pointer to the
     ///   intersection context is propagated to callback functions invoked
     ///   during traversal and can thus be used to extend the ray with
-    ///   additional data. See [`IntersectContext`] for more information.
+    ///   additional data. See [`IntersectContext`](crate::IntersectContext) for
+    ///   more information.
     /// * `ray` - The ray [`RayHit`] to intersect with the scene.
     pub fn intersect<C: AsIntersectContext>(&self, ctx: &mut C, ray: &mut RayHit) {
         unsafe {
@@ -584,7 +585,8 @@ impl<'a> Scene<'a> {
     ///   to be invoked for every intersection. Further, the pointer to the
     ///   intersection context is propagated to callback functions invoked
     ///   during traversal and can thus be used to extend the ray with
-    ///   additional data. See [`IntersectContext`] for more information.
+    ///   additional data. See [`IntersectContext`](crate::IntersectContext) for
+    ///   more information.
     /// * `ray` - The ray packet of size 4 to intersect with the scene. The ray
     ///   packet must be aligned to 16 bytes.
     /// * `valid` - A mask indicating which rays in the packet are valid. -1
@@ -623,7 +625,8 @@ impl<'a> Scene<'a> {
     ///   to be invoked for every intersection. Further, the pointer to the
     ///   intersection context is propagated to callback functions invoked
     ///   during traversal and can thus be used to extend the ray with
-    ///   additional data. See [`IntersectContext`] for more information.
+    ///   additional data. See [`IntersectContext`](crate::IntersectContext) for
+    ///   more information.
     /// * `ray` - The ray packet of size 8 to intersect with the scene. The ray
     ///   packet must be aligned to 32 bytes.
     /// * `valid` - A mask indicating which rays in the packet are valid. -1
@@ -662,7 +665,8 @@ impl<'a> Scene<'a> {
     ///   to be invoked for every intersection. Further, the pointer to the
     ///   intersection context is propagated to callback functions invoked
     ///   during traversal and can thus be used to extend the ray with
-    ///   additional data. See [`IntersectContext`] for more information.
+    ///   additional data. See [`IntersectContext`](crate::IntersectContext) for
+    ///   more information.
     /// * `ray` - The ray packet of size 16 to intersect with the scene. The ray
     ///   packet must be aligned to 64 bytes.
     /// * `valid` - A mask indicating which rays in the packet are valid. -1
@@ -704,7 +708,8 @@ impl<'a> Scene<'a> {
     ///   to be invoked for every intersection. Further, the pointer to the
     ///   intersection context is propagated to callback functions invoked
     ///   during traversal and can thus be used to extend the ray with
-    ///   additional data. See [`IntersectContext`] for more information.
+    ///   additional data. See [`IntersectContext`](crate::IntersectContext) for
+    ///   more information.
     ///
     /// * `ray` - The ray to intersect with the scene.
     pub fn occluded<C: AsIntersectContext>(&self, ctx: &mut C, ray: &mut Ray) -> bool {
@@ -724,7 +729,8 @@ impl<'a> Scene<'a> {
     ///   to be invoked for every intersection. Further, the pointer to the
     ///   intersection context is propagated to callback functions invoked
     ///   during traversal and can thus be used to extend the ray with
-    ///   additional data. See [`IntersectContext`] for more information.
+    ///   additional data. See [`IntersectContext`](crate::IntersectContext) for
+    ///   more information.
     /// * `ray` - The ray packet of size 4 to intersect with the scene. The ray
     ///   packet must be aligned to 16 bytes.
     /// * `valid` - A mask indicating which rays in the packet are valid. -1
@@ -759,7 +765,8 @@ impl<'a> Scene<'a> {
     ///   to be invoked for every intersection. Further, the pointer to the
     ///   intersection context is propagated to callback functions invoked
     ///   during traversal and can thus be used to extend the ray with
-    ///   additional data. See [`IntersectContext`] for more information.
+    ///   additional data. See [`IntersectContext`](crate::IntersectContext) for
+    ///   more information.
     /// * `ray` - The ray packet of size 8 to intersect with the scene. The ray
     ///   packet must be aligned to 32 bytes.
     /// * `valid` - A mask indicating which rays in the packet are valid. -1
@@ -794,7 +801,8 @@ impl<'a> Scene<'a> {
     ///   to be invoked for every intersection. Further, the pointer to the
     ///   intersection context is propagated to callback functions invoked
     ///   during traversal and can thus be used to extend the ray with
-    ///   additional data. See [`IntersectContext`] for more information.
+    ///   additional data. See [`IntersectContext`](crate::IntersectContext) for
+    ///   more information.
     /// * `ray` - The ray packet of size 16 to intersect with the scene. The ray
     ///   packet must be aligned to 64 bytes.
     /// * `valid` - A mask indicating which rays in the packet are valid. -1
@@ -848,7 +856,8 @@ impl<'a> Scene<'a> {
     ///   to be invoked for every intersection. Further, the pointer to the
     ///   intersection context is propagated to callback functions invoked
     ///   during traversal and can thus be used to extend the ray with
-    ///   additional data. See [`IntersectContext`] for more information.
+    ///   additional data. See [`IntersectContext`](crate::IntersectContext) for
+    ///   more information.
     ///
     /// * `rays` - The ray stream to intersect with the scene.
     pub fn intersect_stream_aos<P: RayHitPacket, C: AsIntersectContext>(
@@ -904,7 +913,7 @@ impl<'a> Scene<'a> {
     /// every intersection. Further, the pointer to the intersection context
     /// is propagated to callback functions invoked during traversal and can
     /// thus be used to extend the ray with additional data. See
-    /// [`IntersectContext`] for more information.
+    /// [`IntersectContext`](crate::IntersectContext) for more information.
     ///
     /// * `rays` - The ray stream to intersect with the scene.
     pub fn occluded_stream_aos<P: RayPacket, C: AsIntersectContext>(

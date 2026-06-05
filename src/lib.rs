@@ -51,7 +51,7 @@ pub type Bounds = sys::RTCBounds;
 /// For most geometry types the [`BufferUsage::INDEX`] slot is used to assign
 /// an index buffer, while the [`BufferUsage::VERTEX`] is used to assign the
 /// corresponding vertex buffer.
-///car
+///
 /// The [`BufferUsage::VERTEX_ATTRIBUTE`] slot can get used to assign
 /// arbitrary additional vertex data which can get interpolated using the
 /// [`Geometry::interpolate`] and [`Geometry::interpolate_n`] API calls.
@@ -84,9 +84,9 @@ pub type SubdivisionMode = sys::RTCSubdivisionMode;
 /// The type of a geometry, used to determine which geometry type to create.
 pub type GeometryKind = sys::RTCGeometryType;
 
-/// Marker trait for types usable as callback user data: geometry user data
-/// ([`GeometryBuilder::set_user_data`]) or point-query user data
-/// ([`Scene::point_query`]).
+/// Marker trait for types usable as callback user data: geometry callback user
+/// data (bound via [`GeometryBuilder`]'s `_owned` / `_borrowed` callback
+/// setters) or point-query user data ([`Scene::point_query`]).
 ///
 /// The blanket impl covers every `Send + Sync + 'static` type. The bounds are
 /// required because callbacks may read the data from embree worker threads

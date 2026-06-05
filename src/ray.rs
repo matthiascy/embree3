@@ -92,7 +92,8 @@ impl Ray {
 
     /// Returns the normalized direction of the ray.
     ///
-    /// Do not use this method to calculate the hit point, use [`dir`] instead.
+    /// Do not use this method to calculate the hit point, use
+    /// [`dir`](Self::dir) instead.
     pub fn unit_dir(&self) -> [f32; 3] { normalise_vector3(self.dir()) }
 
     /// Calculates the hit point from the ray and the hit distance.
