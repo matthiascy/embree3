@@ -15,7 +15,7 @@ if (!$?) {
 
 # build the examples
 cd examples
-Get-ChildItem .\ -Directory | ForEach-Object {
+Get-ChildItem .\ -Directory | Where-Object { $_.Name -ne "todos" } | ForEach-Object {
 	Write-Output $_
 	cd $_
 	cargo build

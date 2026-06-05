@@ -1,0 +1,10 @@
+[package]
+name = "next_hit"
+version = "0.1.0"
+edition = "2021"
+authors = ["Will Usher <will@willusher.io>", "Yang Chen <matthiasychen@gmail.com>"]
+
+[dependencies]
+embree3 = { path = "../.." }
+support = { path = "../support" }
+glam = "0.23.0"

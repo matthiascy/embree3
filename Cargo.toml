@@ -1,10 +1,13 @@
 [package]
-name = "embree"
-version = "0.3.8"
-authors = ["Will Usher <will@willusher.io>"]
-homepage = "https://github.com/Twinklebear/embree-rs"
-documentation = "https://docs.rs/embree/"
-repository = "https://github.com/Twinklebear/embree-rs"
+name = "embree3"
+version = "0.3.7"
+authors = [
+    "Will Usher <will@willusher.io>",
+    "Yang Chen <matthiasychen@gmail.com>",
+]
+homepage = "https://github.com/matthiascy/embree-rs"
+# documentation = "https://docs.rs/embree/"
+repository = "https://github.com/matthiascy/embree-rs"
 readme = "README.md"
 license = "MIT"
 description = """
@@ -12,14 +15,26 @@ A wrapper for the Embree ray tracing kernels.
 """
 keywords = ["embree", "ray", "simd", "bvh"]
 build = "build.rs"
+edition = "2021"
 
-exclude = [
-	".travis.yml",
-	"*.png",
-	".gitignore",
-	"examples/*"
-]
+exclude = [".travis.yml", "*.png", ".gitignore", "examples/*"]
 
 [dependencies]
-cgmath = "0.18"
+# Optional: when enabled, the default error reporter routes embree's asynchronous
+# errors through the `log` facade instead of the stderr fallback. Off by default so
+# the crate stays dependency-free unless the application opts in.
+log = { version = "0.4", optional = true }
 
+[dev-dependencies]
+criterion = "0.8"
+
+[[bench]]
+name = "callback_throughput"
+harness = false
+
+[features]
+log = ["dep:log"]
+
+[workspace]
+members = ["examples/*"]
+exclude = ["examples/todos"]

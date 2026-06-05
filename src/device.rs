@@ -1,36 +1,35 @@
-#[cfg(x86_64)]
-use std::arch::x86_64;
-use std::ffi::CString;
-use std::ptr;
+use crate::{
+    callback::ErasedFn, sys::*, Buffer, BufferSize, Bvh, DeviceProperty, Error, Geometry,
+    GeometryBuilder, GeometryKind, Scene, SceneFlags,
+};
+use std::{
+    ffi::CString,
+    fmt::{self, Display, Formatter},
+    ptr,
+    sync::{Arc, Mutex},
+};
 
-use sys::*;
-
+/// Handle to an Embree device.
+#[derive(Debug)]
 pub struct Device {
     pub(crate) handle: RTCDevice,
+    callbacks: Arc<Mutex<DeviceCallbacks>>,
 }
 
-impl Device {
-    pub fn new() -> Device {
-        // Set the flush zero and denormals modes from Embrees's perf. recommendations
-        // https://embree.github.io/api.html#performance-recommendations
-        // Though, in Rust I think we just call the below function to do both
-        #[cfg(x86_64)]
-        unsafe {
-            x86_64::_MM_SET_FLUSH_ZERO_MODE(x86_64::_MM_FLUSH_ZERO_ON);
-        }
+#[derive(Debug, Default)]
+struct DeviceCallbacks {
+    error_fn: Option<ErasedFn>,
+    memory_monitor_fn: Option<ErasedFn>,
+}
 
-        Device {
-            handle: unsafe { rtcNewDevice(ptr::null()) },
+impl Clone for Device {
+    fn clone(&self) -> Self {
+        unsafe { rtcRetainDevice(self.handle) }
+        Self {
+            handle: self.handle,
+            callbacks: self.callbacks.clone(),
         }
     }
-    pub fn debug() -> Device {
-        let cfg = CString::new("verbose=4").unwrap();
-        Device {
-            handle: unsafe { rtcNewDevice(cfg.as_ptr()) },
-        }
-    }
-    // TODO: Setup the flush zero and denormals mode needed by Embree
-    // using the Rust SIMD when it's in core
 }
 
 impl Drop for Device {
@@ -41,4 +40,483 @@ impl Drop for Device {
     }
 }
 
+// SAFETY: `Device` is a handle to a refcounted embree object whose count is
+// updated atomically. Embree permits a device to be used from multiple threads,
+// and the only interior state is `callbacks`, which is `Send + Sync` (the
+// closures are `Send + Sync`, see `ErasedFn`).
+unsafe impl Send for Device {}
 unsafe impl Sync for Device {}
+
+impl Device {
+    pub fn new() -> Result<Device, Error> { create_device(None, true) }
+
+    pub fn debug() -> Result<Device, Error> {
+        let cfg = CString::new("verbose=4").unwrap();
+        create_device(Some(cfg), true)
+    }
+
+    pub fn with_config(config: Config) -> Result<Device, Error> {
+        let cfg = config.to_c_string();
+        create_device(Some(cfg), config.report_errors)
+    }
+
+    /// Register a callback function to be called when an error occurs.
+    ///
+    /// Only a single callback function can be registered per device,
+    /// and further invocations overwrite the previously registered callback.
+    /// In particular this **replaces** the built-in default error reporter that
+    /// the device installs unless [`Config::report_errors`] is `false`.
+    ///
+    /// The error code is also set if an error callback function is registered.
+    ///
+    /// Unregister with [`Device::unset_error_function`].
+    ///
+    /// # Arguments
+    ///
+    /// * `error_fn` - A callback function that takes an error code and a
+    ///   message.
+    ///
+    /// When the callback function is invoked, it gets the error code of the
+    /// occurred error, as well as a message of type `&'static str` that
+    /// further describes the error.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use embree3::Device;
+    /// let device = Device::new().unwrap();
+    /// device.set_error_function(|error, msg| {
+    ///     println!("Error: {:?} {}", error, msg);
+    /// });
+    /// ```
+    ///
+    /// # Thread safety
+    ///
+    /// The error callback may be invoked from the thread that reported the
+    /// error, which can be an embree worker thread during a parallel
+    /// operation. Like the other callbacks it is `Fn + Send + Sync`, so it is
+    /// safe to call from and share across threads.
+    pub fn set_error_function<F>(&self, error_fn: F)
+    where
+        F: Fn(RTCError, &'static str) + Send + Sync + 'static,
+    {
+        let mut cbs = self.callbacks.lock().unwrap();
+        let erased = ErasedFn::new(error_fn);
+        unsafe {
+            rtcSetDeviceErrorFunction(self.handle, error_function::<F>(), erased.as_ptr());
+        }
+        cbs.error_fn = Some(erased);
+    }
+
+    /// Disable the registered error callback function.
+    ///
+    /// This also removes the built-in default error reporter if it is still
+    /// installed, leaving the device with no error callback (errors are then
+    /// only observable via [`Device::get_error`]).
+    pub fn unset_error_function(&self) {
+        let mut cbs = self.callbacks.lock().unwrap();
+        unsafe {
+            rtcSetDeviceErrorFunction(self.handle, None, ptr::null_mut());
+        }
+        cbs.error_fn = None;
+    }
+
+    /// Register a callback function to track memory consumption of the device.
+    ///
+    /// Only a single callback function can be registered per device, and
+    /// further invocations overwrite the previously registered callback.
+    ///
+    /// Once registered, the Embree device will invoke the callback function
+    /// before or after it allocates or frees important memory blocks. The
+    /// callback function might get called from multiple threads
+    /// concurrently.
+    ///
+    /// Unregister with [`Device::unset_memory_monitor_function`].
+    ///
+    /// # Arguments
+    ///
+    /// * `monitor_fn` - A callback function that takes two arguments:
+    ///
+    /// * `bytes: isize` - The number of bytes allocated or deallocated (> 0 for
+    ///   allocations and < 0 for deallocations). The Embree `Device` atomically
+    ///   accumulating `bytes` input parameter.
+    /// * `post: bool` - Whether the callback is invoked after the allocation or
+    ///   deallocation took place.
+    ///
+    /// Embree will continue its operation normally when the callback function
+    /// returns `true`. If `false` returned, Embree will cancel the current
+    /// operation with `RTC_ERROR_OUT_OF_MEMORY` error code.
+    /// Issuing multiple cancel requests from different threads is allowed.
+    /// Cancelling will only happen when the callback was called for
+    /// allocations (bytes > 0), otherwise the cancel request will be ignored.
+    ///
+    /// If a callback to cancel was invoked before the allocation happens (`post
+    /// == false`), then the `bytes` parameter should not be accumulated, as
+    /// the allocation will never happen. If the callback to cancel was
+    /// invoked after the allocation happened (`post == true`), then
+    /// the `bytes` parameter should be accumulated, as the allocation properly
+    /// happened and a deallocation will later free that data block.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use embree3::Device;
+    /// let device = Device::new().unwrap();
+    /// device.set_memory_monitor_function(|bytes, post| {
+    ///     if bytes > 0 {
+    ///         println!("allocated {} bytes", bytes);
+    ///     } else {
+    ///         println!("deallocated {} bytes", -bytes);
+    ///     };
+    ///     true
+    /// });
+    /// ```
+    ///
+    /// # Thread safety
+    ///
+    /// Embree may invoke this callback from multiple threads concurrently (it
+    /// fires around internal allocations, including during a parallel
+    /// [`Scene::commit`](crate::Scene::commit)). The closure must therefore
+    /// be safe to call from several threads at once and to share
+    /// across them: it must not depend on exclusive `&mut` access to its
+    /// captures, and everything it captures must be `Send + Sync`. The
+    /// `Fn + Send + Sync` bounds on the closure enforce this.
+    pub fn set_memory_monitor_function<F>(&self, monitor_fn: F)
+    where
+        F: Fn(isize, bool) -> bool + Send + Sync + 'static,
+    {
+        let mut cbs = self.callbacks.lock().unwrap();
+        let erased = ErasedFn::new(monitor_fn);
+        unsafe {
+            rtcSetDeviceMemoryMonitorFunction(
+                self.handle,
+                memory_monitor_function::<F>(),
+                erased.as_ptr(),
+            );
+        }
+        cbs.memory_monitor_fn = Some(erased);
+    }
+
+    /// Disable the registered memory monitor callback function.
+    pub fn unset_memory_monitor_function(&self) {
+        let mut cbs = self.callbacks.lock().unwrap();
+        unsafe {
+            rtcSetDeviceMemoryMonitorFunction(self.handle, None, ptr::null_mut());
+        }
+        cbs.memory_monitor_fn = None;
+    }
+
+    /// Query a property of the device (ISA support flags, version numbers,
+    /// ...).
+    ///
+    /// # Arguments
+    ///
+    /// * `prop` - The property to query. See [`DeviceProperty`] for the
+    ///   possible values.
+    ///
+    /// # Returns
+    ///
+    /// The property value as an `isize`. Many properties are booleans where `0`
+    /// means *false* / *not supported* (e.g.
+    /// [`DeviceProperty::RAY_MASK_SUPPORTED`]). A `0` is a legitimate value,
+    /// not an error. `rtcGetDeviceProperty` does not signal failure through
+    /// its return value; per the embree contract we clear the per-thread
+    /// error, perform the query, then surface any error the query itself
+    /// raised (only possible for an invalid property, which the
+    /// [`DeviceProperty`] enum already rules out).
+    pub fn get_property(&self, prop: DeviceProperty) -> Result<isize, Error> {
+        // Clear any stale per-thread error so we attribute only this call's error.
+        let _ = self.get_error();
+        let value = unsafe { rtcGetDeviceProperty(self.handle, prop) };
+        match self.get_error() {
+            Error::NONE => Ok(value),
+            error => Err(error),
+        }
+    }
+
+    /// Query the error code of the device.
+    ///
+    /// Each thread has its own error code per device. If an error occurs when
+    /// calling an API function, this error code is set to the occurred
+    /// error if it stores no previous error. The [`Device::get_error`] function
+    /// reads and returns the currently stored error and clears the error
+    /// code. This assures that the returned error code is always the first
+    /// error occurred since the last invocation of [`Device::get_error`].
+    ///
+    /// # Returns
+    ///
+    /// Error code encoded as [`Error`].
+    pub fn get_error(&self) -> RTCError { unsafe { rtcGetDeviceError(self.handle) } }
+
+    /// Creates a new scene bound to the device.
+    pub fn create_scene<'s>(&self) -> Result<Scene<'s>, Error> { Scene::new(self.clone()) }
+
+    /// Creates a new scene bound to the device with the given configuration.
+    /// It's the same as calling [`Device::create_scene`] and then
+    /// [`Scene::set_flags`].
+    ///
+    /// See [`SceneFlags`] for possible values.
+    pub fn create_scene_with_flags(&self, flags: SceneFlags) -> Result<Scene<'_>, Error> {
+        Scene::new_with_flags(self.clone(), flags)
+    }
+
+    /// Creates a new [`Bvh`] object.
+    pub fn create_bvh(&self) -> Result<Bvh, Error> { Bvh::new(self) }
+
+    /// Creates a new data buffer.
+    /// The created buffer is always aligned to 16 bytes.
+    pub fn create_buffer(&self, size: usize) -> Result<Buffer, Error> {
+        Buffer::new(self, BufferSize::new(size).unwrap())
+    }
+
+    /// Creates a [`Geometry`] object bound to the device without any
+    /// buffers attached.
+    pub fn create_geometry<'a>(&self, kind: GeometryKind) -> Result<GeometryBuilder<'a>, Error> {
+        Ok(Geometry::new(self, kind))
+    }
+}
+
+/// Instruction Set Architecture.
+#[derive(Debug, Clone, Copy)]
+pub enum Isa {
+    Sse2,
+    Sse4_2,
+    Avx,
+    Avx2,
+    Avx512,
+}
+
+impl Display for Isa {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), fmt::Error> {
+        match self {
+            Isa::Sse2 => write!(f, "sse2"),
+            Isa::Sse4_2 => write!(f, "sse4.2"),
+            Isa::Avx => write!(f, "avx"),
+            Isa::Avx2 => write!(f, "avx2"),
+            Isa::Avx512 => write!(f, "avx512"),
+        }
+    }
+}
+
+/// Frequency level of the application.
+#[derive(Debug, Clone, Copy)]
+pub enum FrequencyLevel {
+    /// Run at highest frequency.
+    Simd128,
+
+    /// Run at AVX2-heavy frequency level.
+    Simd256,
+
+    /// Run at AVX512-heavy frequency level.
+    Simd512,
+}
+
+impl Display for FrequencyLevel {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), fmt::Error> {
+        match self {
+            FrequencyLevel::Simd128 => write!(f, "simd128"),
+            FrequencyLevel::Simd256 => write!(f, "simd256"),
+            FrequencyLevel::Simd512 => write!(f, "simd512"),
+        }
+    }
+}
+
+/// Embree device configuration.
+pub struct Config {
+    /// The number of build threads. A value of 0 enables all detected hardware
+    /// threads. By default all hardware threads are used.
+    pub threads: u32,
+
+    /// The number of user threads that can be used to join and participate in a
+    /// scene commit using `rtcJoinCommitScene`.
+    pub user_threads: u32,
+
+    /// Whether build threads are affinitized to hardware threads. This is
+    /// disabled by default on standard CPUs, and enabled by default on Xeon
+    /// Phi Processors.
+    pub set_affinity: bool,
+
+    /// When enabled, the build threads are started upfront. Useful for
+    /// benchmarking to exclude thread creation time. This is disabled by
+    /// default.
+    pub start_threads: bool,
+
+    /// ISA selection. By default the ISA is chosen automatically.
+    pub isa: Option<Isa>,
+
+    /// Configures the automated ISA selection to use maximally the specified
+    /// ISA.
+    pub max_isa: Isa,
+
+    /// Enables or disables usage of huge pages. Enabled by default under Linux
+    /// but disabled by default on Windows and macOS.
+    pub hugepages: bool,
+
+    /// Enables or disables the SeLockMemoryPrivilege privilege which is
+    /// required to use huge pages on Windows. This option has only effect
+    /// on Windows and is ignored on other platforms.
+    pub enable_selockmemoryprivilege: bool,
+
+    /// Verbosity of the output [0, 1, 2, 3]. No output when set to 0. The
+    /// higher the level, the more the output. By default the output is set
+    /// to 0.
+    pub verbose: u32,
+
+    /// Frequency level the application want to run on. See [`FrequencyLevel`].
+    /// When some frequency level is specified, Embree will avoid doing
+    /// optimizations that may reduce the frequency level below the level
+    /// specified.
+    pub frequency_level: Option<FrequencyLevel>,
+
+    /// Whether to install the built-in default error reporter on the created
+    /// device. Enabled by default: embree reports many errors asynchronously
+    /// from inside its kernels (during commit/intersect), where there is no
+    /// `Result` to return them through, so without a handler they are silently
+    /// lost. The default reporter is a safety harness for exactly those errors.
+    ///
+    /// It routes through the [`log`](https://docs.rs/log) facade when the `log`
+    /// cargo feature is enabled, and otherwise writes to stderr. Set this to
+    /// `false` to create a device with no default handler, or simply install
+    /// your own with [`Device::set_error_function`] (which replaces the
+    /// default) or remove it with [`Device::unset_error_function`].
+    pub report_errors: bool,
+}
+
+impl Config {
+    /// Converts the configuration to a C string.
+    pub fn to_c_string(&self) -> CString {
+        let isa = self
+            .isa
+            .map(|isa| format!("isa={},", isa))
+            .unwrap_or_default();
+        let frequency_level = self
+            .frequency_level
+            .map(|frequency_level| format!("frequency_level={}", frequency_level))
+            .unwrap_or_default();
+        let formated = format!(
+            "threads={},verbose={},set_affinity={},start_threads={},max_isa={},hugepages={},\
+             enable_selockmemoryprivilege={},{}{}",
+            self.threads,
+            self.verbose,
+            self.set_affinity as u32,
+            self.start_threads as u32,
+            self.max_isa,
+            self.hugepages as u32,
+            self.enable_selockmemoryprivilege as u32,
+            isa,
+            frequency_level
+        )
+        .into_bytes();
+        unsafe { CString::from_vec_unchecked(formated) }
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            threads: 0,
+            user_threads: 0,
+            set_affinity: false,
+            start_threads: false,
+            isa: None,
+            max_isa: Isa::Avx512,
+            hugepages: cfg!(target_os = "linux"),
+            enable_selockmemoryprivilege: false,
+            verbose: 0,
+            frequency_level: None,
+            report_errors: true,
+        }
+    }
+}
+
+/// Set the flush zero and denormals modes from Embrees's perf. recommendations
+/// `<https://embree.github.io/api.html#performance-recommendations>`.
+pub fn enable_ftz_and_daz() {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        #[cfg(target_arch = "x86")]
+        use std::arch::x86::{_mm_getcsr, _mm_setcsr, _MM_FLUSH_ZERO_MASK};
+        #[cfg(target_arch = "x86_64")]
+        use std::arch::x86_64::{_mm_getcsr, _mm_setcsr, _MM_FLUSH_ZERO_MASK};
+
+        let flag = _MM_FLUSH_ZERO_MASK | 0x0040;
+        unsafe {
+            let csr = (_mm_getcsr() & !flag) | flag;
+            _mm_setcsr(csr);
+        }
+    }
+}
+
+/// The built-in default error reporter, installed by the device constructors
+/// unless [`Config::report_errors`] is `false`.
+///
+/// Embree reports many errors asynchronously from inside its kernels (during
+/// commit/intersect), where there is no `Result` to carry them back, so without
+/// a handler they are silently lost. This reporter is the safety harness for
+/// exactly those errors. It routes through the [`log`](https://docs.rs/log) facade when the
+/// `log` cargo feature is enabled, and otherwise writes to stderr.
+fn default_error_reporter(error: RTCError, msg: &str) {
+    #[cfg(feature = "log")]
+    log::error!("embree: {:?} — {}", error, msg);
+    #[cfg(not(feature = "log"))]
+    eprintln!("[embree] {:?} — {}", error, msg);
+}
+
+/// Helper function to create a new Embree device.
+fn create_device(config: Option<CString>, report_errors: bool) -> Result<Device, Error> {
+    enable_ftz_and_daz();
+    let config = config.unwrap_or_else(|| Config::default().to_c_string());
+    let handle = unsafe { rtcNewDevice(config.as_ptr()) };
+    if handle.is_null() {
+        Err(unsafe { rtcGetDeviceError(ptr::null_mut()) })
+    } else {
+        let device = Device {
+            handle,
+            callbacks: Arc::new(Mutex::new(DeviceCallbacks::default())),
+        };
+        // Install the default safety-harness error reporter unless opted out. Embree
+        // also stores the last error code regardless, retrievable via
+        // [`Device::get_error`]; callers wanting custom reporting replace the default
+        // with [`Device::set_error_function`] or remove it with
+        // [`Device::unset_error_function`].
+        if report_errors {
+            device.set_error_function(default_error_reporter);
+        }
+        Ok(device)
+    }
+}
+
+/// Helper function to convert a Rust closure to `RTCErrorFunction` callback.
+fn error_function<F>() -> RTCErrorFunction
+where
+    F: Fn(RTCError, &'static str) + Send + Sync + 'static,
+{
+    unsafe extern "C" fn inner<F>(
+        f: *mut std::os::raw::c_void,
+        error: RTCError,
+        msg: *const std::os::raw::c_char,
+    ) where
+        F: Fn(RTCError, &'static str) + Send + Sync + 'static,
+    {
+        let cb = &*(f as *const F);
+        cb(error, std::ffi::CStr::from_ptr(msg).to_str().unwrap())
+    }
+
+    Some(inner::<F>)
+}
+
+/// Helper function to convert a Rust closure to `RTCMemoryMonitorFunction`
+/// callback.
+fn memory_monitor_function<F>() -> RTCMemoryMonitorFunction
+where
+    F: Fn(isize, bool) -> bool + Send + Sync + 'static,
+{
+    unsafe extern "C" fn inner<F>(f: *mut std::os::raw::c_void, bytes: isize, post: bool) -> bool
+    where
+        F: Fn(isize, bool) -> bool + Send + Sync + 'static,
+    {
+        let cb = &*(f as *const F);
+        cb(bytes, post)
+    }
+
+    Some(inner::<F>)
+}
