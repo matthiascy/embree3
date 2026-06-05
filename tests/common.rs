@@ -2,8 +2,8 @@
 #![allow(dead_code)]
 
 use embree3::{
-    BufferUsage, Device, Format, GeometryBuilder, GeometryKind, IntersectContext, Ray, RayHit,
-    Scene,
+    Bounds, BufferUsage, Device, Format, GeometryBuilder, GeometryKind, IntersectContext, Ray,
+    RayHit, Scene,
 };
 
 pub fn device() -> Device {
@@ -56,4 +56,18 @@ pub fn clobber_stack() {
         *b = (i as u8) ^ 0x5A;
     }
     std::hint::black_box(&buf);
+}
+
+pub fn user_sphere(deviec: &Device) -> GeometryBuilder<'static> {
+    let mut geom = deviec.create_geometry(GeometryKind::USER).unwrap();
+    geom.set_primitive_count(1);
+    geom.set_bounds_function::<_, ()>(|bounds: &mut Bounds, _prim, _time, _user: Option<&()>| {
+        bounds.lower_x = -0.5;
+        bounds.lower_y = -0.5;
+        bounds.lower_z = -0.5;
+        bounds.upper_x = 0.5;
+        bounds.upper_y = 0.5;
+        bounds.upper_z = 0.5;
+    });
+    geom
 }
