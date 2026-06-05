@@ -1,6 +1,6 @@
 mod common;
 
-use embree::{BufferSource, BufferUsage, Error, Format, GeometryKind};
+use embree3::{BufferSource, BufferUsage, Error, Format, GeometryKind};
 
 fn as_bytes<T>(s: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, std::mem::size_of_val(s)) }

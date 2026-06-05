@@ -344,7 +344,7 @@ impl<'a> Scene<'a> {
     /// Useful when setting individual flags, e.g. to just set the robust mode
     /// without changing other flags the following way:
     /// ```no_run
-    /// use embree::{Device, Scene, SceneFlags};
+    /// use embree3::{Device, Scene, SceneFlags};
     /// let device = Device::new().unwrap();
     /// let scene = device.create_scene().unwrap();
     /// let flags = scene.get_flags();

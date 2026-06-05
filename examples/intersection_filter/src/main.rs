@@ -9,7 +9,7 @@
 //! all surfaces along the ray, and terminates traversal if an opaque surface
 //! occluder is hit.
 
-use embree::{
+use embree3::{
     AlignedArray, BufferUsage, BuildQuality, Device, Format, Geometry, GeometryKind, HitN,
     IntersectContextExt, Ray, RayHit, RayN, Scene, SoAHit, SoARay, ValidityN, INVALID_ID,
 };
@@ -167,8 +167,8 @@ fn render_pixel(x: u32, y: u32, camera: &Camera, scene: &Scene) -> u32 {
         weight *= primary_extra.transparency;
         primary.ray.tnear = 1.001 * primary.ray.tfar;
         primary.ray.tfar = f32::INFINITY;
-        primary.hit.geomID = embree::INVALID_ID;
-        primary.hit.primID = embree::INVALID_ID;
+        primary.hit.geomID = embree3::INVALID_ID;
+        primary.hit.primID = embree3::INVALID_ID;
         primary_extra.transparency = 0.0;
     }
 

@@ -1,6 +1,6 @@
 mod common;
 
-use embree::{CbKind, IntersectContext, Ray};
+use embree3::{CbKind, IntersectContext, Ray};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
@@ -129,7 +129,7 @@ fn owned_data_dropped_once_and_readable_via_getter() {
 
 #[test]
 fn borrowed_data_reaches_callback_zero_copy() {
-    use embree::{BufferUsage, Format, GeometryKind};
+    use embree3::{BufferUsage, Format, GeometryKind};
 
     // Non-'static data, declared BEFORE the builder so it outlives it. The
     // borrow is refcount-free, no `Arc`, no allocation beyond `table` itself.

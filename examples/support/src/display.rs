@@ -5,7 +5,7 @@ use arcball::ArcballCamera;
 use cgmath::{InnerSpace, Vector2, Vector3};
 use clock_ticks;
 use egui_wgpu::renderer::ScreenDescriptor;
-use embree::{IntersectContext, Ray, RayHit, RayHitNp, RayNp};
+use embree3::{IntersectContext, Ray, RayHit, RayHitNp, RayNp};
 use futures;
 use rayon::iter::ParallelIterator;
 use wgpu;

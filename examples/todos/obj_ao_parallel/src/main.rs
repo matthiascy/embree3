@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 extern crate cgmath;
-extern crate embree;
+extern crate embree3;
 extern crate rand;
 extern crate rayon;
 extern crate support;
@@ -9,7 +9,7 @@ extern crate tobj;
 use std::path::Path;
 
 use cgmath::{InnerSpace, Matrix3, Point2, Vector2, Vector3, Vector4};
-use embree::{Device, Geometry, IntersectContext, Ray, RayHit, Scene, TriangleMesh};
+use embree3::{Device, Geometry, IntersectContext, Ray, RayHit, Scene, TriangleMesh};
 use rand::prelude::*;
 use rayon::prelude::*;
 use support::Camera;
@@ -79,7 +79,7 @@ pub struct AOIntegrator<'embree> {
     // A borrowed commited scene
     // Note here the lifetime for borrowing and devide are the same
     // Which is fine in our case
-    rtscene: &'embree embree::CommittedScene<'embree>,
+    rtscene: &'embree embree3::CommittedScene<'embree>,
     // List of models loaded from tobj
     models: Vec<tobj::Model>,
     // Meshs ids (to map embree intersection with the models list)

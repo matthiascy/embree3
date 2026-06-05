@@ -18,7 +18,7 @@ use std::sync::{
     Arc,
 };
 
-use embree::{Config, Device};
+use embree3::{Config, Device};
 
 #[test]
 fn memory_monitor_closure_is_invoked_with_live_state() {

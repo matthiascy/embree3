@@ -10,7 +10,7 @@
 //! This stub keeps the workspace building. It sets up a device and scene but
 //! renders nothing.
 
-use embree::Device;
+use embree3::Device;
 
 fn main() {
     let device = Device::new().unwrap();

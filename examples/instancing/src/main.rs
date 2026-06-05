@@ -1,9 +1,9 @@
 #![allow(dead_code)]
-extern crate embree;
+extern crate embree3;
 extern crate support;
 
 use cgmath::{InnerSpace, Matrix, Matrix4, SquareMatrix, Vector3, Vector4};
-use embree::{
+use embree3::{
     BufferUsage, BuildQuality, Device, Format, Geometry, InstanceGeometryBuilder, IntersectContext,
     Ray, RayHit, SceneFlags, INVALID_ID,
 };
@@ -42,7 +42,7 @@ const COLORS: [[[f32; 3]; 4]; 4] = [
 fn create_sphere(device: &Device, pos: Vector3<f32>, radius: f32) -> Geometry<'static> {
     // Create a triangulated sphere
     let mut geometry = device
-        .create_geometry(embree::GeometryKind::TRIANGLE)
+        .create_geometry(embree3::GeometryKind::TRIANGLE)
         .unwrap();
     geometry.set_build_quality(BuildQuality::LOW);
 
@@ -102,7 +102,7 @@ fn create_sphere(device: &Device, pos: Vector3<f32>, radius: f32) -> Geometry<'s
 }
 
 fn create_ground_plane(device: &Device) -> Geometry<'static> {
-    let mut geometry = Geometry::new(device, embree::GeometryKind::TRIANGLE);
+    let mut geometry = Geometry::new(device, embree3::GeometryKind::TRIANGLE);
     {
         geometry
             .set_new_buffer::<[f32; 4]>(BufferUsage::VERTEX, 0, Format::FLOAT3, 16, 4)

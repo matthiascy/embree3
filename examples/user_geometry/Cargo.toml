@@ -6,5 +6,5 @@ edition = "2021"
 
 [dependencies]
 glam = "0.23.0"
-embree = { path = "../.." }
+embree3 = { path = "../.." }
 support = { path = "../support" }

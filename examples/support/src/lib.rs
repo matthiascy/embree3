@@ -8,7 +8,7 @@ pub use camera::Camera;
 pub use display::Display;
 pub use egui;
 
-use embree::Scene;
+use embree3::Scene;
 pub use image::{Rgba, RgbaImage};
 pub use rayon::{iter::*, prelude::*, slice::*, vec::*};
 

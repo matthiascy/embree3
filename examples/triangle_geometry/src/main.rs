@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
-extern crate embree;
+extern crate embree3;
 extern crate support;
 
-use embree::{
+use embree3::{
     BufferUsage, Device, Format, Geometry, IntersectContext, QuadMeshBuilder, Ray, RayHit,
     TriangleMeshBuilder, INVALID_ID,
 };

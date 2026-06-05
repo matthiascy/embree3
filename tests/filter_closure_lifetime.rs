@@ -3,7 +3,7 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
-use embree::IntersectContext;
+use embree3::IntersectContext;
 
 #[test]
 fn capturing_intersect_filter_is_invoked_with_live_state() {

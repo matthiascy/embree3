@@ -296,7 +296,7 @@ impl<'buf> GeometryShared<'buf> {
 /// handle):
 ///
 /// ```compile_fail
-/// use embree::{Device, GeometryKind};
+/// use embree3::{Device, GeometryKind};
 /// let device = Device::new().unwrap();
 /// let builder = device.create_geometry(GeometryKind::TRIANGLE).unwrap();
 /// let _alias = builder.clone(); // error: GeometryBuilder is not Clone
@@ -305,7 +305,7 @@ impl<'buf> GeometryShared<'buf> {
 /// nor shared across threads (`!Sync`):
 ///
 /// ```compile_fail
-/// use embree::{Device, GeometryKind};
+/// use embree3::{Device, GeometryKind};
 /// fn needs_sync<T: Sync>(_: &T) {}
 /// let device = Device::new().unwrap();
 /// let builder = device.create_geometry(GeometryKind::TRIANGLE).unwrap();
@@ -865,7 +865,7 @@ impl<'buf> GeometryBuilder<'buf> {
     /// geometry is a type error:
     ///
     /// ```compile_fail
-    /// # use embree::{Device, GeometryKind, IntersectContext};
+    /// # use embree3::{Device, GeometryKind, IntersectContext};
     /// let device = Device::new().unwrap();
     /// let mut tri = device.create_geometry(GeometryKind::TRIANGLE).unwrap();
     /// let data = vec![1u32, 2, 3];
@@ -2055,7 +2055,7 @@ impl<'buf> Geometry<'buf> {
     /// # Examples
     ///
     /// ```no_run
-    /// use embree::{Device, Geometry, GeometryKind};
+    /// use embree3::{Device, Geometry, GeometryKind};
     ///
     /// let device = Device::new().unwrap();
     /// let builder = Geometry::new(&device, GeometryKind::TRIANGLE);
@@ -2065,7 +2065,7 @@ impl<'buf> Geometry<'buf> {
     /// or use the [`Device::create_geometry`] method:
     ///
     /// ```no_run
-    /// use embree::{Device, GeometryKind};
+    /// use embree3::{Device, GeometryKind};
     ///
     /// let device = Device::new().unwrap();
     /// let builder = device.create_geometry(GeometryKind::TRIANGLE).unwrap();

@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 extern crate cgmath;
-extern crate embree;
+extern crate embree3;
 extern crate support;
 
 use cgmath::{Vector3, Vector4};
-use embree::{
+use embree3::{
     BezierCurve, BsplineCurve, CatmullRomCurve, Device, Geometry, HermiteCurve, IntersectContext,
     LinearCurve, QuadMesh, Ray, RayHit, Scene,
 };

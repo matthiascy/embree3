@@ -8,7 +8,7 @@
 //! error, call, check the error.
 mod common;
 
-use embree::DeviceProperty;
+use embree3::DeviceProperty;
 
 #[test]
 fn zero_valued_property_is_ok_not_err() {

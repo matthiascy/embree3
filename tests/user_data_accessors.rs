@@ -5,7 +5,7 @@
 
 mod common;
 
-use embree::{Bounds, CbKind, GeometryKind};
+use embree3::{Bounds, CbKind, GeometryKind};
 
 #[derive(Debug, PartialEq)]
 struct UserData {

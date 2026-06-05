@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use embree::{BufferUsage, Device, Format, GeometryKind, IntersectContext, Ray, RayHit, Scene};
+use embree3::{BufferUsage, Device, Format, GeometryKind, IntersectContext, Ray, RayHit, Scene};
 
 const GRID: usize = 1024;
 

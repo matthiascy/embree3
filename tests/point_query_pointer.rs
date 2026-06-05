@@ -7,7 +7,7 @@ mod common;
 
 use std::{cell::RefCell, rc::Rc};
 
-use embree::{PointQuery, PointQueryContext, INVALID_ID};
+use embree3::{PointQuery, PointQueryContext, INVALID_ID};
 
 #[test]
 fn point_query_invokes_callback_with_live_state() {

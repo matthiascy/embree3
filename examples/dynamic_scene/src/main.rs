@@ -1,6 +1,6 @@
 //! This example show how to create a dynamic scene.
 
-use embree::{
+use embree3::{
     BufferUsage, BuildQuality, Device, Format, Geometry, IntersectContext, Ray, RayHit, Scene,
     SceneFlags,
 };
@@ -22,7 +22,7 @@ fn create_sphere<'a>(
 ) -> Geometry<'a> {
     // Create a triangulated sphere
     let mut geometry = device
-        .create_geometry(embree::GeometryKind::TRIANGLE)
+        .create_geometry(embree3::GeometryKind::TRIANGLE)
         .unwrap();
     geometry.set_build_quality(quality);
 
@@ -82,7 +82,7 @@ fn create_sphere<'a>(
 }
 
 fn create_ground_plane<'a>(device: &Device) -> Geometry<'a> {
-    let mut geometry = Geometry::new(device, embree::GeometryKind::TRIANGLE);
+    let mut geometry = Geometry::new(device, embree3::GeometryKind::TRIANGLE);
     {
         geometry
             .set_new_buffer::<[f32; 4]>(BufferUsage::VERTEX, 0, Format::FLOAT3, 16, 4)

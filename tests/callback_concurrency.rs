@@ -1,5 +1,5 @@
 mod common;
-use embree::{IntersectContext, Ray, RayHit};
+use embree3::{IntersectContext, Ray, RayHit};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,

@@ -17,7 +17,7 @@ use std::sync::{
     Arc,
 };
 
-use embree::{Bounds, GeometryKind};
+use embree3::{Bounds, GeometryKind};
 
 #[test]
 fn bounds_callback_runs_under_concurrent_commit() {

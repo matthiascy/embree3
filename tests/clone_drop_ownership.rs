@@ -2,7 +2,7 @@
 //! still use.
 mod common;
 
-use embree::{Bounds, GeometryKind};
+use embree3::{Bounds, GeometryKind};
 use std::sync::{Arc, Mutex};
 
 struct UserData {

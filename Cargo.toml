@@ -1,10 +1,13 @@
 [package]
-name = "embree"
+name = "embree3"
 version = "0.3.7"
-authors = ["Will Usher <will@willusher.io>"]
-homepage = "https://github.com/Twinklebear/embree-rs"
-documentation = "https://docs.rs/embree/"
-repository = "https://github.com/Twinklebear/embree-rs"
+authors = [
+    "Will Usher <will@willusher.io>",
+    "Yang Chen <matthiasychen@gmail.com>",
+]
+homepage = "https://github.com/matthiascy/embree-rs"
+# documentation = "https://docs.rs/embree/"
+repository = "https://github.com/matthiascy/embree-rs"
 readme = "README.md"
 license = "MIT"
 description = """

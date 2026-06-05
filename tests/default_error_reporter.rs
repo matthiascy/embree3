@@ -9,7 +9,7 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
-use embree::{Config, Error};
+use embree3::{Config, Error};
 
 #[test]
 fn report_errors_is_on_by_default() {

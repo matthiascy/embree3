@@ -1,4 +1,4 @@
-use embree::{
+use embree3::{
     AlignedArray, BufferUsage, Device, Format, Geometry, GeometryKind, IntersectContext, Ray,
     RayHit, Scene, SceneFlags,
 };
@@ -200,7 +200,7 @@ fn render_pixel(
             let mut n = Vec3::from(ray_hit.hit.unit_normal());
             #[cfg(feature = "smooth_normals")]
             {
-                use embree::{InterpolateInput, InterpolateOutput};
+                use embree3::{InterpolateInput, InterpolateOutput};
                 let hit_point: Vec3 = ray_hit.ray.hit_point().into();
                 if ray_hit.hit.geomID != ground_id {
                     let mut output = InterpolateOutput::new(3, true, true, false);

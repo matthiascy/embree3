@@ -4,7 +4,7 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
-use embree::{Bounds, GeometryKind};
+use embree3::{Bounds, GeometryKind};
 
 struct UserData {
     magic: u32,

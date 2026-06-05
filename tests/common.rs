@@ -1,7 +1,7 @@
 //! Shared helpers for the FFI soundness proof tests.
 #![allow(dead_code)]
 
-use embree::{
+use embree3::{
     BufferUsage, Device, Format, GeometryBuilder, GeometryKind, IntersectContext, Ray, RayHit,
     Scene,
 };

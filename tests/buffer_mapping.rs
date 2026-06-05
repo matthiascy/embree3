@@ -15,7 +15,7 @@
 //! could not.
 mod common;
 
-use embree::{BufferUsage, Error};
+use embree3::{BufferUsage, Error};
 
 /// Build phase, sole owner: re-fill a `set_new_buffer` allocation through
 /// `map_buffer_mut`, then read it back through `map_buffer`. Proves both map to

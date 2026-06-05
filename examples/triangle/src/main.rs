@@ -1,9 +1,11 @@
 #![allow(dead_code)]
 
-extern crate embree;
+extern crate embree3;
 extern crate support;
 
-use embree::{BufferUsage, Device, Format, IntersectContext, RayHitNp, RayNp, TriangleMeshBuilder};
+use embree3::{
+    BufferUsage, Device, Format, IntersectContext, RayHitNp, RayNp, TriangleMeshBuilder,
+};
 use support::{rgba_to_u32, DebugState};
 
 fn main() {
