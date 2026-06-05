@@ -5,3 +5,5 @@ Cargo.lock
 *.dll
 .idea
 
+# Upstream Embree C source, kept locally for reference (not part of this crate)
+/embree/

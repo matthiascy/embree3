@@ -1,4 +1,4 @@
-# embree
+# embree3
 
 Rust bindings to [Embree](https://embree.github.io/), Intel's high-performance
 ray-tracing kernels. Targets **Embree 3.13.5**.
@@ -9,7 +9,7 @@ ray-tracing kernels. Targets **Embree 3.13.5**.
 > table, a `GeometryBuilder`/`Geometry` typestate that enforces embree's "modify
 > only what you uniquely own" rule, and a typed, zero-copy buffer API.
 
-[![CI](https://github.com/matthiascy/embree-rs/actions/workflows/main.yml/badge.svg)](https://github.com/matthiascy/embree-rs/actions/workflows/main.yml)
+[![CI](https://github.com/matthiascy/embree3/actions/workflows/main.yml/badge.svg)](https://github.com/matthiascy/embree3/actions/workflows/main.yml)
 
 Still in development; some features are in progress.
 

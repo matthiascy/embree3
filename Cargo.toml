@@ -5,9 +5,9 @@ authors = [
     "Will Usher <will@willusher.io>",
     "Yang Chen <matthiasychen@gmail.com>",
 ]
-homepage = "https://github.com/matthiascy/embree-rs"
-# documentation = "https://docs.rs/embree/"
-repository = "https://github.com/matthiascy/embree-rs"
+homepage = "https://github.com/matthiascy/embree3"
+# documentation = "https://docs.rs/embree3/"
+repository = "https://github.com/matthiascy/embree3"
 readme = "README.md"
 license = "MIT"
 description = """

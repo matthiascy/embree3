@@ -1,4 +1,4 @@
-# embree-rs FFI soundness tests
+# embree3 FFI soundness tests
 
 These tests prove the callback/user-data lifetime and type model is sound. A rendered
 image is NOT proof; UB does not reliably crash. Each proof captures non-trivial state,

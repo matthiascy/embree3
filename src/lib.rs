@@ -1,14 +1,14 @@
-//! [![Crates.io](https://img.shields.io/crates/v/embree.svg)](https://crates.io/crates/embree)
-//! [![Build Status](https://travis-ci.org/Twinklebear/embree-rs.svg?branch=master)](https://travis-ci.org/Twinklebear/embree-rs)
+//! [![Crates.io](https://img.shields.io/crates/v/embree3.svg)](https://crates.io/crates/embree3)
+//! [![CI](https://github.com/matthiascy/embree3/actions/workflows/main.yml/badge.svg)](https://github.com/matthiascy/embree3/actions/workflows/main.yml)
 //!
 //! Rust bindings to [Embree](http://embree.github.io/). These are still in
 //! development, so a range of features are in progress.
 //!
 //! # Documentation
 //!
-//! Rust doc can be found [here](https://docs.rs/embree/).
+//! Rust doc can be found [here](https://docs.rs/embree3/).
 //! Embree documentation can be found [here](https://embree.github.io/api.html).
-//! See the [examples/](https://github.com/Twinklebear/embree-rs/tree/master/examples)
+//! See the [examples/](https://github.com/matthiascy/embree3/tree/master/examples)
 //! for some example applications using the bindings.
 
 extern crate core;

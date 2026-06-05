@@ -1,7 +1,7 @@
 #!/bin/bash
 
 source embree-${EMBREE_VERSION}.x86_64.macosx/embree-vars.sh
-echo "Building embree-rs tests"
+echo "Building embree3 tests"
 cargo test
 if [[ "$?" != "0" ]]; then
     exit 1
