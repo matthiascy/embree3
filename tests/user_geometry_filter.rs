@@ -1,0 +1,118 @@
+//! Proves a user-geometry intersect callback can invoke the geometry's
+//! intersection filter chain via `filter_intersection`, that the filter runs
+//! with **live captured state** (no use-after-free), and that the filter's
+//! accept/reject decision is honoured.
+mod common;
+
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
+
+use embree3::{
+    Hit, IntersectContext, IntersectFunctionNArgs, OccludedFunctionNArgs, Ray4, RayHit4, SoAHit,
+    SoARay, INVALID_ID,
+};
+
+/// Builds a scene with a single user-geometry sphere, whose intersect callback
+/// reports a hit a `t = 1.5` (the front of the unit sphere for the test ray)
+/// and runs it through the filter chain. The registered intersect filter
+/// captures `probe`/`calls` and either accepts (leaves valid = -1) or rejects
+/// (writes valid = 0) based on `reject`.
+fn trace_sphere_with_filter(reject: bool) -> (bool, Vec<u32>, usize) {
+    let device = common::device();
+    let mut scene = device.create_scene().unwrap();
+
+    let probe: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let probe_cb = probe.clone();
+    let calls_cb = calls.clone();
+
+    let mut sphere = common::user_sphere(&device);
+
+    // Intersector: report a candidate hit at t=1.5, filter it, commit on
+    // survivial.
+    sphere.set_intersect_function::<_, (), IntersectContext>(
+        move |args: &mut IntersectFunctionNArgs<'_, IntersectContext, ()>| {
+            for i in 0..args.len() {
+                if args.valid_n()[i] == 0 {
+                    continue; // skip inactive rays
+                }
+                let mut ray = args.ray(i);
+                let t = 1.5_f32;
+                if t > ray.tnear && t < ray.tfar {
+                    let mut hit = Hit {
+                        Ng_x: 0.0,
+                        Ng_y: 0.0,
+                        Ng_z: -1.0,
+                        u: 0.0,
+                        v: 0.0,
+                        primID: args.prim_id(),
+                        geomID: args.geom_id(),
+                        instID: [INVALID_ID], /* single-level, no instancing in this test
+                                               * Initialize hit properties */
+                    };
+                    ray.tfar = t; // candidate distance the filter will see
+                    if args.filter_intersection(&mut ray, &mut hit) {
+                        args.commit_hit(i, &ray, &hit);
+                    }
+                }
+            }
+        },
+    );
+
+    sphere.set_intersect_filter_function::<_, (), IntersectContext>(
+        move |_ray, hit, mut valid, _ctx, _user: Option<&()>| {
+            calls_cb.fetch_add(1, Ordering::SeqCst);
+            probe_cb.lock().unwrap().push(0xF11A ^ hit.prim_id(0));
+            if reject {
+                valid[0] = 0; // reject the hit
+            }
+        },
+    );
+
+    let sphere = sphere.commit();
+    scene.attach_geometry(&sphere);
+    scene.commit();
+
+    // Make any dangling-stack UAF deterministic.
+    common::clobber_stack();
+
+    let ray = embree3::Ray::segment([0.0, 0.0, -2.0], [0.0, 0.0, 1.0], 0.0, f32::INFINITY);
+    let mut ctx = IntersectContext::coherent();
+    let mut ray_hit = embree3::RayHit::from(ray);
+    scene.intersect(&mut ctx, &mut ray_hit);
+
+    // Bind the lock/clone to a local so the `MutexGuard` temporary is dropped at
+    // this statement's end, not at the function block's end, where it would
+    // outlive `probe`.
+    let hit_valid = ray_hit.hit.is_valid();
+    let recorded = probe.lock().unwrap().clone();
+    let call_count = calls.load(Ordering::SeqCst);
+    (hit_valid, recorded, call_count)
+}
+
+#[test]
+fn filter_runs_for_user_geometry_and_accepts() {
+    let (hit_valid, probe, calls) = trace_sphere_with_filter(false);
+    assert!(
+        calls >= 1,
+        "the intersect filter must run via the user geometry"
+    );
+    assert_eq!(
+        probe,
+        vec![0xF11A ^ 0],
+        "filter saw live captured state + primID 0"
+    );
+    assert!(hit_valid, "accepted hit must be committed");
+}
+
+#[test]
+fn filter_runs_for_user_geometry_and_rejects() {
+    let (hit_valid, _probe, calls) = trace_sphere_with_filter(true);
+    assert!(
+        calls >= 1,
+        "the intersect filter must run via the user geometry"
+    );
+    assert!(!hit_valid, "rejected hit must NOT be committed");
+}

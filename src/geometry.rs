@@ -25,8 +25,8 @@ use std::{
 use crate::{
     buffer::required_layout_bytes, callback::ErasedFn, sys::*, AsIntersectContext, Bounds, Buffer,
     BufferData, BufferLayout, BufferSize, BufferSource, BufferUsage, BufferView, BufferViewMut,
-    BuildQuality, Device, Error, Format, GeometryKind, HitN, QuaternionDecomposition, RayHitN,
-    RayN, Scene, SubdivisionMode, UserData,
+    BuildQuality, Device, Error, Format, GeometryKind, Hit, HitN, QuaternionDecomposition, Ray,
+    RayHitN, RayN, Scene, SoAHit, SoARay, SubdivisionMode, UserData,
 };
 
 use std::{
@@ -1347,10 +1347,7 @@ impl<'buf> GeometryBuilder<'buf> {
     where
         D: UserData,
         C: AsIntersectContext,
-        F: for<'a> Fn(RayHitN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
-            + Send
-            + Sync
-            + 'static,
+        F: for<'a> Fn(&mut IntersectFunctionNArgs<'a, C, D>) + Send + Sync + 'static,
     {
         match self.shared.kind {
             GeometryKind::USER => unsafe {
@@ -1378,10 +1375,7 @@ impl<'buf> GeometryBuilder<'buf> {
     where
         D: UserData,
         C: AsIntersectContext,
-        F: for<'a> Fn(RayHitN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
-            + Send
-            + Sync
-            + 'static,
+        F: for<'a> Fn(&mut IntersectFunctionNArgs<'a, C, D>) + Send + Sync + 'static,
     {
         match self.shared.kind {
             GeometryKind::USER => unsafe {
@@ -1411,10 +1405,7 @@ impl<'buf> GeometryBuilder<'buf> {
     where
         D: UserData,
         C: AsIntersectContext,
-        F: for<'a> Fn(RayHitN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
-            + Send
-            + Sync
-            + 'static,
+        F: for<'a> Fn(&mut IntersectFunctionNArgs<'a, C, D>) + Send + Sync + 'static,
     {
         match self.shared.kind {
             GeometryKind::USER => unsafe {
@@ -1479,10 +1470,7 @@ impl<'buf> GeometryBuilder<'buf> {
     where
         D: UserData,
         C: AsIntersectContext,
-        F: for<'a> Fn(RayN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
-            + Send
-            + Sync
-            + 'static,
+        F: for<'a> Fn(&mut OccludedFunctionNArgs<'a, C, D>) + Send + Sync + 'static,
     {
         match self.shared.kind {
             GeometryKind::USER => {
@@ -1512,10 +1500,7 @@ impl<'buf> GeometryBuilder<'buf> {
     where
         D: UserData,
         C: AsIntersectContext,
-        F: for<'a> Fn(RayN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
-            + Send
-            + Sync
-            + 'static,
+        F: for<'a> Fn(&mut OccludedFunctionNArgs<'a, C, D>) + Send + Sync + 'static,
     {
         match self.shared.kind {
             GeometryKind::USER => {
@@ -1543,14 +1528,20 @@ impl<'buf> GeometryBuilder<'buf> {
     /// [`set_occluded_function`](Self::set_occluded_function). See
     /// [`set_intersect_filter_function_borrowed`](Self::set_intersect_filter_function_borrowed)
     /// for the per-callback owned-vs-borrowed data model. (User geometry only.)
+    ///
+    /// # Arguments
+    ///
+    /// - `occluded`: The callback function to register, which is invoked by
+    ///   occlusion queries to test whether the rays of a packet of variable
+    ///   size are occluded by a user-defined primitive.
+    /// - `data`: A shared reference to the user data of the geometry, which is
+    ///  passed to the callback when invoked. The caller must ensure that the
+    /// geometry does not outlive the data.
     pub fn set_occluded_function_borrowed<F, D, C>(&mut self, occluded: F, data: &'buf D)
     where
         D: UserData,
         C: AsIntersectContext,
-        F: for<'a> Fn(RayN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
-            + Send
-            + Sync
-            + 'static,
+        F: for<'a> Fn(&mut OccludedFunctionNArgs<'a, C, D>) + Send + Sync + 'static,
     {
         match self.shared.kind {
             GeometryKind::USER => {
@@ -2650,19 +2641,421 @@ impl_geometry_type!(InstanceGeometryBuilder, GeometryKind::INSTANCE,
     /// An instance geometry builder.
 );
 
+/// Arguments handed to a user-geometry **intersect** callback registered via
+/// [`GeometryBuilder::set_intersect_function`].
+///
+/// Besides the ray packet and per-callback user data, it carries the machinery
+/// to run a candidate hit through the geometry's intersection filter and the
+/// context filter via [`filter_intersection`](Self::filter_intersection), which
+/// is the only way a user geometry can honour filter functions, since embree
+/// cannot auto-invoke them for user-computed hits.
+///
+/// Per-ray usage (the filter primitive is always `N = 1`; loop the packet):
+/// gather lane `i` with [`ray`](Self::ray), build a fully-initialized [`Hit`],
+/// set `ray.tfar` to the candidate distance, call
+/// [`filter_intersection`](Self::filter_intersection), and on `true` commit
+/// with [`commit_hit`](Self::commit_hit). Skip lanes where `valid_n()[i] == 0`.
 pub struct IntersectFunctionNArgs<'a, C: AsIntersectContext, D: UserData> {
-    pub ray_hit_n: RayHitN<'a>,
-    pub valid_n: ValidityN<'a>,
-    pub context: &'a mut C,
-    pub geom_id: u32,
-    pub prim_id: u32,
-    pub user_data: Option<&'a mut D>,
-    raw_geom_user_ptr: *mut std::os::raw::c_void,
+    // The original FFI args pointer. Required by `rtcFilterIntersection`, and the
+    // source of the ray/hit packet (`(*raw).rayhit`) and `N`. Valid only for the
+    // duration of the callback invocation; `*const` makes the struct `!Send`/`!Sync`
+    // so it cannot escape to another thread.
+    raw: *const RTCIntersectFunctionNArguments,
+    valid_n: ValidityN<'a>,
+    context: &'a mut C,
+    geom_id: u32,
+    prim_id: u32,
+    user_data: Option<&'a D>,
 }
 
 impl<'a, C: AsIntersectContext, D: UserData> IntersectFunctionNArgs<'a, C, D> {
-    /// Returns the number of rays in the ray packet.
-    pub fn len(&self) -> usize { self.ray_hit_n.len() }
+    /// Number of rays in the packet.
+    pub fn len(&self) -> usize {
+        // SAFETY: `raw` is the live args pointer for this callback invocation.
+        unsafe { (*self.raw).N as usize }
+    }
+
+    /// Whether the packet is empty.
+    pub fn is_empty(&self) -> bool { self.len() == 0 }
+
+    /// Per-ray validity mask (`0` = inactive lane, skip it; `-1` = active).
+    pub fn valid_n(&self) -> &ValidityN<'a> { &self.valid_n }
+
+    /// Mutable validity mask.
+    pub fn valid_n_mut(&mut self) -> &mut ValidityN<'a> { &mut self.valid_n }
+
+    /// The intersection context.
+    pub fn context(&self) -> &C { self.context }
+
+    /// The intersection context, mutably.
+    pub fn context_mut(&mut self) -> &mut C { self.context }
+
+    /// Geometry ID being intersected.
+    pub fn geom_id(&self) -> u32 { self.geom_id }
+
+    /// Primitive ID being intersected.
+    pub fn prim_id(&self) -> u32 { self.prim_id }
+
+    /// Per-callback user data (if bound via the `_owned` / `_borrowed` setter).
+    pub fn user_data(&self) -> Option<&D> { self.user_data }
+
+    // The ray packet (SoA) of the underlying `RTCRayHitN`. The ray block is at
+    // offset 0 of the rayhit buffer.
+    #[inline]
+    fn rays(&self) -> RayN<'a> {
+        RayN {
+            ptr: unsafe { (*self.raw).rayhit as *mut RTCRayN },
+            len: self.len(),
+            marker: PhantomData,
+        }
+    }
+
+    // The hit packet (SoA). `RTCRayHitN` lays the hit block after the 12-float
+    // ray block, i.e. at `rayhit + 12 * N` u32s, the same offset `RayHitN::hit_n`
+    // uses. NOTE: this is the rayhit's *own* hit block (for scatter); it is NOT
+    // the filter's `hit` argument, which is always a separate `Hit` local.
+    #[inline]
+    fn hits(&self) -> HitN<'a> {
+        let n = self.len();
+        HitN {
+            ptr: unsafe { ((*self.raw).rayhit as *const u32).add(12 * n) as *mut RTCHitN },
+            len: n,
+            marker: PhantomData,
+        }
+    }
+
+    /// Gather lane `i` of the packet into a contiguous single-ray [`Ray`]
+    /// (≈ embree's `rtcGetRayHitFromRayHitN`, ray part). `ray.tfar` is the
+    /// current closest-hit distance for that lane.
+    pub fn ray(&self, i: usize) -> Ray {
+        debug_assert!(i < self.len(), "ray index out of bounds");
+        let r = self.rays();
+        let org = r.org(i);
+        let dir = r.dir(i);
+        Ray {
+            org_x: org[0],
+            org_y: org[1],
+            org_z: org[2],
+            tnear: r.tnear(i),
+            dir_x: dir[0],
+            dir_y: dir[1],
+            dir_z: dir[2],
+            time: r.time(i),
+            tfar: r.tfar(i),
+            mask: r.mask(i),
+            id: r.id(i),
+            flags: r.flags(i),
+        }
+    }
+
+    /// Run a candidate single-ray `hit` (paired with its `ray`, whose `tfar` is
+    /// the candidate distance) through the geometry's intersection filter
+    /// **and** the context filter. Returns `true` if the hit survived (then
+    /// commit it with [`commit_hit`](Self::commit_hit)); `false` if
+    /// rejected.
+    ///
+    /// `hit` must be **fully initialized** (`Ng_*`, `u`, `v`, `geomID`,
+    /// `primID`, `instID`) which are required by the filter.
+    pub fn filter_intersection(&mut self, ray: &mut Ray, hit: &mut Hit) -> bool {
+        let mut valid: i32 = -1;
+        let fargs = RTCFilterFunctionNArguments {
+            valid: &mut valid,
+            // SAFETY: `raw` is the live args pointer for this callback invocation.
+            // `geometryUserPtr` here is the crate's per-geometry `CallSite` pointer,
+            // which the filter trampolines already expect.
+            geometryUserPtr: unsafe { (*self.raw).geometryUserPtr },
+            context: unsafe { (*self.raw).context },
+            ray: ray as *mut Ray as *mut RTCRayN,
+            hit: hit as *mut Hit as *mut RTCHitN,
+            N: 1,
+        };
+        // SAFETY: `fargs` supplies separate contiguous N=1 `ray` and `hit` buffers
+        // (the filter reads `ray` and `hit` as independent pointers, `hit` is NOT
+        // `ray + 12*N`; we always pass the candidate `hit`, never one derived from
+        // the rayhit). `raw` is the live args pointer.
+        unsafe { rtcFilterIntersection(self.raw, &fargs) };
+        valid != 0
+    }
+
+    /// Scatter an accepted single `hit` and `ray.tfar` back to lane `i` of the
+    /// packet (≈ embree's `rtcCopyHitToHitN`). Single-level instancing only
+    /// (`instID[0]`).
+    pub fn commit_hit(&mut self, i: usize, ray: &Ray, hit: &Hit) {
+        debug_assert!(i < self.len(), "commit index out of bounds");
+        let mut rays = self.rays();
+        rays.set_tfar(i, ray.tfar);
+        let mut hits = self.hits();
+        hits.set_normal(i, [hit.Ng_x, hit.Ng_y, hit.Ng_z]);
+        hits.set_uv(i, [hit.u, hit.v]);
+        hits.set_prim_id(i, hit.primID);
+        hits.set_geom_id(i, hit.geomID);
+        hits.set_inst_id(i, hit.instID[0]);
+    }
+
+    /// Set lane `i`'s packet-ray `tfar` (to a candidate distance before a
+    /// packet filter, or to restore it after a rejection).
+    pub fn set_tfar(&mut self, i: usize, tfar: f32) {
+        debug_assert!(i < self.len(), "tfar index out of bounds");
+        let mut rays = self.rays();
+        rays.set_tfar(i, tfar);
+    }
+
+    /// Filter the whole packet in ONE `rtcFilterIntersection` call (`N =
+    /// len()`), using the packet's own ray block as the filter ray input.
+    ///
+    /// - `hits[i]`: candidate [`Hit`] for lane `i`, fully initialized for every
+    ///   lane marked active in `valid`. `hits.len()` must equal `len()`.
+    /// - `valid[i]`: `-1` = test this lane, `0` = skip. On return `valid[i] ==
+    ///   0` means the lane was skipped or rejected; `-1` means it survived.
+    ///   `valid.len()` must equal `len()`.
+    ///
+    /// Set each active lane's `tfar` via [`set_tfar`](Self::set_tfar)
+    /// **before** calling (the filter reads the packet ray). This does NOT
+    /// commit and does NOT restore `tfar`: commit survivors (e.g.
+    /// `commit_hit(i, &self.ray(i), &hits[i])`) and restore `tfar` on
+    /// rejected lanes yourself.
+    pub fn filter_intersection_n(&mut self, hits: &mut [Hit], valid: &mut [i32]) {
+        let n = self.len();
+        debug_assert_eq!(hits.len(), n, "hits length must equal packet width");
+        debug_assert_eq!(valid.len(), n, "valid length must equal packet width");
+
+        // Stage an N-wide SoA candidate-hit scratch (separate from the packet's hit
+        // block, so a rejected lane never leaves a stale hit there). RTCHitN SoA is
+        // 8 fields x N: [Ng_x, Ng_y, Ng_z, u, v, primID, geomID, instID], N <= 16.
+        let mut scratch = [0u32; 8 * 16];
+        {
+            let mut hn = HitN {
+                ptr: scratch.as_mut_ptr() as *mut RTCHitN,
+                len: n,
+                marker: PhantomData,
+            };
+            for i in 0..n {
+                if valid[i] == 0 {
+                    continue;
+                }
+                hn.set_normal(i, [hits[i].Ng_x, hits[i].Ng_y, hits[i].Ng_z]);
+                hn.set_uv(i, [hits[i].u, hits[i].v]);
+                hn.set_prim_id(i, hits[i].primID);
+                hn.set_geom_id(i, hits[i].geomID);
+                hn.set_inst_id(i, hits[i].instID[0]);
+            }
+        }
+
+        let fargs = RTCFilterFunctionNArguments {
+            valid: valid.as_mut_ptr(),
+            // SAFETY: `raw` is the live args pointer for this callback invocation.
+            geometryUserPtr: unsafe { (*self.raw).geometryUserPtr },
+            context: unsafe { (*self.raw).context },
+            // Packet's own ray block, already N-wide SoA, no copy.
+            ray: unsafe { (*self.raw).rayhit as *mut RTCRayN },
+            hit: scratch.as_mut_ptr() as *mut RTCHitN,
+            N: n as u32,
+        };
+        // SAFETY: `ray` is the packet's N-wide SoA ray block; `hit` is our N-wide SoA
+        // candidate scratch; `valid` has N entries; `raw` is live.
+        unsafe { rtcFilterIntersection(self.raw, &fargs) };
+
+        // The filter may modify the candidate hits; transpose the scratch back.
+        let hn = HitN {
+            ptr: scratch.as_mut_ptr() as *mut RTCHitN,
+            len: n,
+            marker: PhantomData,
+        };
+        for i in 0..n {
+            if valid[i] == 0 {
+                continue;
+            }
+            let ng = hn.normal(i);
+            hits[i].Ng_x = ng[0];
+            hits[i].Ng_y = ng[1];
+            hits[i].Ng_z = ng[2];
+            hits[i].u = hn.u(i);
+            hits[i].v = hn.v(i);
+            hits[i].primID = hn.prim_id(i);
+            hits[i].geomID = hn.geom_id(i);
+            hits[i].instID[0] = hn.inst_id(i);
+        }
+    }
+}
+
+/// Arguments handed to a user-geometry **occluded** callback registered via
+/// [`GeometryBuilder::set_occluded_function`]. The occlusion analogue of
+/// [`IntersectFunctionNArgs`]: there is no hit buffer in the packet, so on
+/// survival mark the lane occluded with [`set_occluded`](Self::set_occluded).
+pub struct OccludedFunctionNArgs<'a, C: AsIntersectContext, D: UserData> {
+    raw: *const RTCOccludedFunctionNArguments,
+    valid_n: ValidityN<'a>,
+    context: &'a mut C,
+    geom_id: u32,
+    prim_id: u32,
+    user_data: Option<&'a D>,
+}
+
+impl<'a, C: AsIntersectContext, D: UserData> OccludedFunctionNArgs<'a, C, D> {
+    /// Number of rays in the packet.
+    pub fn len(&self) -> usize {
+        // SAFETY: `raw` is the live args pointer for this callback invocation.
+        unsafe { (*self.raw).N as usize }
+    }
+
+    /// Whether the packet is empty.
+    pub fn is_empty(&self) -> bool { self.len() == 0 }
+
+    /// Per-ray validity mask (`0` = inactive lane, skip it; `-1` = active).
+    pub fn valid_n(&self) -> &ValidityN<'a> { &self.valid_n }
+
+    /// Mutable validity mask.
+    pub fn valid_n_mut(&mut self) -> &mut ValidityN<'a> { &mut self.valid_n }
+
+    /// The intersection context.
+    pub fn context(&self) -> &C { self.context }
+
+    /// The intersection context, mutably.
+    pub fn context_mut(&mut self) -> &mut C { self.context }
+
+    /// Geometry ID being tested.
+    pub fn geom_id(&self) -> u32 { self.geom_id }
+
+    /// Primitive ID being tested.
+    pub fn prim_id(&self) -> u32 { self.prim_id }
+
+    /// Per-callback user data (if bound via the `_owned` / `_borrowed` setter).
+    pub fn user_data(&self) -> Option<&D> { self.user_data }
+
+    // The ray packet (SoA). For occlusion the args carry a plain `ray` pointer.
+    #[inline]
+    fn rays(&self) -> RayN<'a> {
+        RayN {
+            ptr: unsafe { (*self.raw).ray },
+            len: self.len(),
+            marker: PhantomData,
+        }
+    }
+
+    /// Gather lane `i` of the packet into a contiguous single-ray [`Ray`].
+    pub fn ray(&self, i: usize) -> Ray {
+        debug_assert!(i < self.len(), "ray index out of bounds");
+        let r = self.rays();
+        let org = r.org(i);
+        let dir = r.dir(i);
+        Ray {
+            org_x: org[0],
+            org_y: org[1],
+            org_z: org[2],
+            tnear: r.tnear(i),
+            dir_x: dir[0],
+            dir_y: dir[1],
+            dir_z: dir[2],
+            time: r.time(i),
+            tfar: r.tfar(i),
+            mask: r.mask(i),
+            id: r.id(i),
+            flags: r.flags(i),
+        }
+    }
+
+    /// Run a candidate occluder (`ray` + fully-initialized `hit`) through the
+    /// geometry's occlusion filter **and** the context filter. Returns `true`
+    /// if it survived (then mark the lane occluded via
+    /// [`set_occluded`](Self::set_occluded)); `false` if rejected.
+    pub fn filter_occlusion(&mut self, ray: &mut Ray, hit: &mut Hit) -> bool {
+        let mut valid: i32 = -1;
+        let fargs = RTCFilterFunctionNArguments {
+            valid: &mut valid,
+            // SAFETY: `raw` is the live args pointer for this callback invocation.
+            geometryUserPtr: unsafe { (*self.raw).geometryUserPtr },
+            context: unsafe { (*self.raw).context },
+            ray: ray as *mut Ray as *mut RTCRayN,
+            hit: hit as *mut Hit as *mut RTCHitN,
+            N: 1,
+        };
+        // SAFETY: separate contiguous N=1 ray/hit buffers; `raw` is live (see
+        // `filter_intersection`).
+        unsafe { rtcFilterOcclusion(self.raw, &fargs) };
+        valid != 0
+    }
+
+    /// Mark lane `i` occluded by setting its `tfar` to `-inf` (embree's
+    /// occlusion convention).
+    pub fn set_occluded(&mut self, i: usize) {
+        debug_assert!(i < self.len(), "occluded index out of bounds");
+        let mut rays = self.rays();
+        rays.set_tfar(i, f32::NEG_INFINITY);
+    }
+
+    /// Set lane `i`'s packet-ray `tfar` (candidate distance before a packet
+    /// filter, or to restore it after a rejection).
+    pub fn set_tfar(&mut self, i: usize, tfar: f32) {
+        debug_assert!(i < self.len(), "tfar index out of bounds");
+        let mut rays = self.rays();
+        rays.set_tfar(i, tfar);
+    }
+
+    /// Packet occlusion filter: ONE `rtcFilterOcclusion` call (`N = len()`)
+    /// using the packet's own ray block. Same `hits` / `valid` contract as
+    /// [`IntersectFunctionNArgs::filter_intersection_n`]. Set active lanes'
+    /// `tfar` via [`set_tfar`](Self::set_tfar) first; mark survivors
+    /// occluded with [`set_occluded`](Self::set_occluded) and restore
+    /// `tfar` on rejected lanes.
+    pub fn filter_occlusion_n(&mut self, hits: &mut [Hit], valid: &mut [i32]) {
+        let n = self.len();
+        debug_assert_eq!(hits.len(), n, "hits length must equal packet width");
+        debug_assert_eq!(valid.len(), n, "valid length must equal packet width");
+
+        // N-wide SoA candidate-hit scratch (see filter_intersection_n for layout).
+        let mut scratch = [0u32; 8 * 16];
+        {
+            let mut hn = HitN {
+                ptr: scratch.as_mut_ptr() as *mut RTCHitN,
+                len: n,
+                marker: PhantomData,
+            };
+            for i in 0..n {
+                if valid[i] == 0 {
+                    continue;
+                }
+                hn.set_normal(i, [hits[i].Ng_x, hits[i].Ng_y, hits[i].Ng_z]);
+                hn.set_uv(i, [hits[i].u, hits[i].v]);
+                hn.set_prim_id(i, hits[i].primID);
+                hn.set_geom_id(i, hits[i].geomID);
+                hn.set_inst_id(i, hits[i].instID[0]);
+            }
+        }
+
+        let fargs = RTCFilterFunctionNArguments {
+            valid: valid.as_mut_ptr(),
+            // SAFETY: `raw` is the live args pointer for this callback invocation.
+            geometryUserPtr: unsafe { (*self.raw).geometryUserPtr },
+            context: unsafe { (*self.raw).context },
+            // Occlusion args carry a plain `ray` pointer (N-wide SoA).
+            ray: unsafe { (*self.raw).ray },
+            hit: scratch.as_mut_ptr() as *mut RTCHitN,
+            N: n as u32,
+        };
+        // SAFETY: `ray` is the packet's N-wide SoA ray block; `hit` is our N-wide SoA
+        // candidate scratch; `valid` has N entries; `raw` is live.
+        unsafe { rtcFilterOcclusion(self.raw, &fargs) };
+
+        let hn = HitN {
+            ptr: scratch.as_mut_ptr() as *mut RTCHitN,
+            len: n,
+            marker: PhantomData,
+        };
+        for i in 0..n {
+            if valid[i] == 0 {
+                continue;
+            }
+            let ng = hn.normal(i);
+            hits[i].Ng_x = ng[0];
+            hits[i].Ng_y = ng[1];
+            hits[i].Ng_z = ng[2];
+            hits[i].u = hn.u(i);
+            hits[i].v = hn.v(i);
+            hits[i].primID = hn.prim_id(i);
+            hits[i].geomID = hn.geom_id(i);
+            hits[i].instID[0] = hn.inst_id(i);
+        }
+    }
 }
 
 mod trampoline {
@@ -2798,19 +3191,13 @@ mod trampoline {
     where
         D: UserData,
         C: AsIntersectContext,
-        F: for<'a> Fn(RayHitN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
-            + Send
-            + Sync
-            + 'static,
+        F: for<'a> Fn(&mut IntersectFunctionNArgs<'a, C, D>) + Send + Sync + 'static,
     {
         unsafe extern "C" fn inner<F, D, C>(args: *const RTCIntersectFunctionNArguments)
         where
             D: UserData,
             C: AsIntersectContext,
-            F: for<'a> Fn(RayHitN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
-                + Send
-                + Sync
-                + 'static,
+            F: for<'a> Fn(&mut IntersectFunctionNArgs<'a, C, D>) + Send + Sync + 'static,
         {
             let site = &*((*args).geometryUserPtr as *const CallSite);
             let slot = site.slots[CbKind::UserIntersect as usize];
@@ -2831,22 +3218,18 @@ mod trampoline {
             };
             let len = (*args).N as usize;
 
-            cb(
-                RayHitN {
-                    ptr: (*args).rayhit,
-                    len,
-                    marker: PhantomData,
-                },
-                ValidityN {
+            cb(&mut IntersectFunctionNArgs {
+                raw: args,
+                valid_n: ValidityN {
                     ptr: (*args).valid,
                     len,
                     marker: PhantomData,
                 },
-                &mut *((*args).context as *mut _ as *mut C),
-                (*args).geomID,
-                (*args).primID,
+                context: &mut *((*args).context as *mut _ as *mut C),
+                geom_id: (*args).geomID,
+                prim_id: (*args).primID,
                 user_data,
-            );
+            })
         }
 
         Some(inner::<F, D, C>)
@@ -2899,19 +3282,13 @@ mod trampoline {
     where
         D: UserData,
         C: AsIntersectContext,
-        F: for<'a> Fn(RayN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
-            + Send
-            + Sync
-            + 'static,
+        F: for<'a> Fn(&mut OccludedFunctionNArgs<'a, C, D>) + Send + Sync + 'static,
     {
         unsafe extern "C" fn inner<F, D, C>(args: *const RTCOccludedFunctionNArguments)
         where
             D: UserData,
             C: AsIntersectContext,
-            F: for<'a> Fn(RayN<'a>, ValidityN<'a>, &mut C, u32, u32, Option<&D>)
-                + Send
-                + Sync
-                + 'static,
+            F: for<'a> Fn(&mut OccludedFunctionNArgs<'a, C, D>) + Send + Sync + 'static,
         {
             let site = &*((*args).geometryUserPtr as *const CallSite);
             let slot = site.slots[CbKind::UserOccluded as usize];
@@ -2931,22 +3308,18 @@ mod trampoline {
                 Some(&*(slot.user_data as *const D))
             };
 
-            cb(
-                RayN {
-                    ptr: (*args).ray,
-                    len: (*args).N as usize,
-                    marker: PhantomData,
-                },
-                ValidityN {
+            cb(&mut OccludedFunctionNArgs {
+                raw: args,
+                valid_n: ValidityN {
                     ptr: (*args).valid,
                     len: (*args).N as usize,
                     marker: PhantomData,
                 },
-                &mut *((*args).context as *mut _ as *mut C),
-                (*args).geomID,
-                (*args).primID,
+                context: &mut *((*args).context as *mut _ as *mut C),
+                geom_id: (*args).geomID,
+                prim_id: (*args).primID,
                 user_data,
-            )
+            })
         }
 
         Some(inner::<F, D, C>)
@@ -3169,61 +3542,3 @@ impl<'a, 'b> Iterator for ValidityNIterMut<'a, 'b> {
         }
     }
 }
-
-// pub struct FilterFnNArgs<'a, C: AsIntersectContext, D: UserData> {
-//     pub ray_n: RayN<'a>,
-//     pub hit_n: HitN<'a>,
-//     pub valid_n: ValidityN<'a>,
-//     pub context: &'a mut C,
-//     pub user_data: Option<&'a mut D>,
-//     pub count: usize,
-// }
-//
-// pub struct OccludedFnNArgs<'a, C: AsIntersectContext, D: UserData> {
-//     pub ray_n: RayN<'a>,
-//     pub valid_n: ValidityN<'a>,
-//     pub context: &'a mut C,
-//     pub geom_id: u32,
-//     pub prim_id: u32,
-//     pub user_data: Option<&'a mut D>,
-//     pub count: usize,
-// }
-//
-// /// Invokes the intersection filter function.
-// ///
-// /// This function can be used inside the intersection filter function
-// callback /// ([`GeometryBuilder::set_intersect_filter_function`]) to invoke
-// the intersection /// filter function registered to the geometry and stored
-// inside the context. pub fn invoke_intersect_filter<'a, C: AsIntersectContext,
-// D: UserData>(     isect_args: &IntersectFunctionNArgs<'a, C, D>,
-//     filter_args: &FilterFnNArgs<'a, C, D>,
-// ) {
-//     let intersect_arguments = RTCIntersectFunctionNArguments {
-//         valid: isect_args.valid_n.ptr as *mut i32,
-//         geometryUserPtr: (),
-//         primID: isect_args.prim_id as u32,
-//         context: isect_args.context.as_mut_context_ptr(),
-//         rayhit: isect_args.ray_hit_n.ptr,
-//         N: isect_args.count as u32,
-//         geomID: isect_args.geom_id,
-//     };
-//     let filter_arguments = RTCFilterFunctionNArguments {
-//         valid: filter_args.valid_n.ptr as *mut i32,
-//         geometryUserPtr: (),
-//         context: filter_args.context.as_mut_context_ptr(),
-//         ray: filter_args.ray_n.ptr,
-//         hit: filter_args.hit_n.ptr,
-//         N: ,
-//     };
-//     unsafe { rtcFilterIntersection(&intersect_arguments as *const
-// RTCIntersectFunctionNArguments) } }
-//
-// /// Invokes the occlusion filter function.
-// ///
-// /// This function can be used inside the occlusion filter function callback
-// /// ([`GeometryBuilder::set_occluded_filter_function`]) to invoke the
-// occlusion filter. pub fn invoke_occluded_filter<'a, C: AsIntersectContext, D:
-// UserData>(     occluded_args: &OccludedFnNArgs<'a, C, D>,
-//     filter_args: &FilterFnNArgs<'a, C, D>,
-// ) {
-// }
