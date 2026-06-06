@@ -1,0 +1,17 @@
+# ThreadSanitizer suppressions for embree's uninstrumented native dependencies.
+#
+# embree runs its parallel BVH build / scene commit on a oneTBB thread pool.
+# Neither libembree3 nor oneTBB is built with -fsanitize=thread, so TSAN cannot
+# observe their internal happens-before synchronization and reports
+# false-positive data races (mostly at TBB thread-pool launch and process
+# teardown, e.g. tbb::detail::r1::destroy_process_mask). These entries silence
+# reports originating in those libraries, so only races in this crate's own
+# instrumented code are surfaced.
+#
+# Note: needed when linking a TBB-tasked embree (e.g. the system embree on many
+# Linux distros). The official embree release uses internal tasking and is
+# usually quiet, but keeping these makes the TSAN run deterministic either way.
+called_from_lib:libtbb.so.12
+called_from_lib:libembree3.so.3
+race:libtbb.so
+race:libembree3.so

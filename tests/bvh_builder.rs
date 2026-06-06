@@ -207,3 +207,29 @@ fn create_leaf_sees_every_primitive_id_once_at_medium() {
         "create_leaf must see every primID exactly once"
     );
 }
+
+#[test]
+fn shared_user_data_is_reached_soundly() {
+    let device = Device::new().unwrap();
+    let mut bvh = device.create_bvh().unwrap();
+    let mut prims = make_prims(4096); // large enough to fan out across threads
+    let cfg = BuildConfig::default();
+    let recorder = Recorder::default();
+
+    let covered = bvh
+        .build_scoped(&cfg, &mut prims, &recorder, |r| {
+            r.root().map(|root| sum_prims(&r, root)).unwrap_or(0)
+        })
+        .unwrap();
+
+    // Wiring + sound shared mutation under embree's threading.
+    assert_eq!(covered, 4096);
+    assert!(recorder.nodes.load(Ordering::Relaxed) > 0);
+    assert!(recorder.leaves.load(Ordering::Relaxed) > 0);
+
+    // Informational only: how many distinct threads ran callbacks. We do NOT
+    // assert > 1, since a low-core machine or a small build may use one thread.
+    let n_threads = recorder.threads.lock().unwrap().len();
+    eprintln!("bvh build ran callbacks on {n_threads} distinct thread(s)");
+    assert!(n_threads >= 1);
+}
