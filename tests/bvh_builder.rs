@@ -187,3 +187,23 @@ fn build_covers_all_primitives_via_navigation() {
 
     assert_eq!(covered, 64, "every primitive must reach a leaf");
 }
+
+#[test]
+fn create_leaf_sees_every_primitive_id_once_at_medium() {
+    let device = Device::new().unwrap();
+    let mut bvh = device.create_bvh().unwrap();
+    let mut prims = make_prims(64);
+    let cfg = BuildConfig::default(); // MEDIUM: no spatial splits, so no primID duplication
+    let recorder = Recorder::default();
+
+    bvh.build_scoped(&cfg, &mut prims, &recorder, |_r| ())
+        .unwrap();
+
+    let mut ids = recorder.prim_ids.into_inner().unwrap();
+    ids.sort_unstable();
+    assert_eq!(
+        ids,
+        (0..64).collect::<Vec<u32>>(),
+        "create_leaf must see every primID exactly once"
+    );
+}
