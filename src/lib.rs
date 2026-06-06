@@ -10,6 +10,23 @@
 //! Embree documentation can be found [here](https://embree.github.io/api.html).
 //! See the [examples/](https://github.com/matthiascy/embree3/tree/master/examples)
 //! for some example applications using the bindings.
+//!
+//! # Intentionally unwrapped embree functions
+//!
+//! A few embree C entry points are deliberately *not* exposed, because a safer
+//! or more idiomatic Rust mechanism already covers them. Reach for the
+//! alternative listed here:
+//!
+//! | embree C function | Use instead | Why |
+//! |---|---|---|
+//! | `rtcNewSharedBuffer` | [`GeometryBuilder::set_shared_buffer`] | App-owned, zero-copy data is bound through a real `&'buf [u8]` borrow, so the compiler enforces "the data outlives the geometry". The C buffer *object* exists to share a raw pointer across bindings, which a Rust reference already does, so it adds no capability. |
+//! | `rtcSetGeometryPointQueryFunction` | [`Scene::point_query`] | Its callback receives no per-geometry pointer (only the scene query's `userPtr`), so it cannot host a capturing closure. Branch on `geomID` inside the [`Scene::point_query`] closure for per-geometry logic. |
+//! | `rtcGetSceneDevice` | [`Scene::device`] | The scene already tracks (and hands back) its [`Device`]; the raw getter would only duplicate it. |
+//! | `rtcSetDeviceProperty` | *(none)* | Embree exposes **no public writable device properties** (the only settable ones are hidden internal debug integers), so a wrapper would reject every public `DeviceProperty`. Use [`Device::get_property`] for the read-only queries. |
+//!
+//! Two further functions, `rtcGetGeometryUserData` and `rtcRetainGeometry`, are
+//! not exposed because the crate's geometry ownership model (an internal `Arc`
+//! plus a lock-free callback table) supersedes them; no user action is needed.
 
 extern crate core;
 
@@ -45,6 +62,11 @@ pub use scene::*;
 // Pull in some cleaned up enum and bitfield types directly,
 // with prettier aliases
 pub type Bounds = sys::RTCBounds;
+
+/// Linear (motion-blur) bounds: the axis-aligned bounding box at the start
+/// (`bounds0`) and end (`bounds1`) of the scene's time range. See
+/// [`Scene::get_linear_bounds`](crate::Scene::get_linear_bounds).
+pub type LinearBounds = sys::RTCLinearBounds;
 
 /// Defines the type of slots to assign data buffers to.
 ///

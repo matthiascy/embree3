@@ -441,8 +441,8 @@ fn test_stream_layout_hitnp() {
 
 #[test]
 fn test_stream_new_hitnp() {
-    let mut hit = HitNp::new(13);
-    for hit in hit.iter_hits() {
+    let hitnp = HitNp::new(13);
+    for hit in hitnp.iter_hits() {
         assert_eq!(hit.normal(), [0.0, 0.0, 0.0]);
         assert_eq!(hit.uv(), [0.0, 0.0]);
         assert_eq!(hit.prim_id(), INVALID_ID);

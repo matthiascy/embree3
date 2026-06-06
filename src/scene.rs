@@ -1,7 +1,7 @@
 use crate::{
     callback::ErasedFn, AsIntersectContext, Bounds, BufferData, BufferUsage, BuildQuality, Error,
-    Format, PointQuery, PointQuery16, PointQuery4, PointQuery8, PointQueryContext, Ray, Ray16,
-    Ray8, RayHit, RayHit16, RayHit8, RayHitNp, RayHitPacket, RayPacket, SceneFlags,
+    Format, LinearBounds, PointQuery, PointQuery16, PointQuery4, PointQuery8, PointQueryContext,
+    Ray, Ray16, Ray8, RayHit, RayHit16, RayHit8, RayHitNp, RayHitPacket, RayPacket, SceneFlags,
 };
 use std::{
     collections::HashMap,
@@ -1091,6 +1091,34 @@ impl<'a> Scene<'a> {
         };
         unsafe {
             rtcGetSceneBounds(self.handle(), &mut bounds as *mut Bounds);
+        }
+        bounds
+    }
+
+    /// Returns the scene's linear (motion-blur) bounds: the axis-aligned
+    /// bounding box at the start and end of the time range (`bounds0` /
+    /// `bounds1`).
+    ///
+    /// For a scene without motion blur, both equal the static
+    /// [`get_bounds`](Self::get_bounds). May only be called after
+    /// [`commit`](Self::commit).
+    pub fn get_linear_bounds(&self) -> LinearBounds {
+        let zero = Bounds {
+            lower_x: 0.0,
+            upper_x: 0.0,
+            lower_y: 0.0,
+            upper_y: 0.0,
+            lower_z: 0.0,
+            upper_z: 0.0,
+            align0: 0.0,
+            align1: 0.0,
+        };
+        let mut bounds = LinearBounds {
+            bounds0: zero,
+            bounds1: zero,
+        };
+        unsafe {
+            rtcGetSceneLinearBounds(self.handle, &mut bounds as *mut LinearBounds);
         }
         bounds
     }

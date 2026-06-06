@@ -717,6 +717,25 @@ impl<'buf> GeometryBuilder<'buf> {
         }
     }
 
+    /// Sets the maximal curve-radius scaling factor for the **min-width**
+    /// feature (rounds curves / points up to reduce aliasing).
+    ///
+    /// The feature is off unless embree was built with the `EMBREE_MIN_WIDTH`
+    /// option, so on a default build this returns
+    /// [`Error::INVALID_OPERATION`](crate::Error::INVALID_OPERATION). When the
+    /// feature is enabled, `scale` must be `>= 1.0` (otherwise
+    /// [`Error::INVALID_ARGUMENT`](crate::Error::INVALID_ARGUMENT)); pair it
+    /// with `IntersectContext`'s `minWidthDistanceFactor` at query time.
+    pub fn set_max_radius_scale(&mut self, scale: f32) -> Result<(), Error> {
+        // Clear any stale per-thread error so we attribute only this call's error.
+        let _ = self.shared.device.get_error();
+        unsafe { rtcSetGeometryMaxRadiusScale(self.shared.handle, scale) };
+        match self.shared.device.get_error() {
+            Error::NONE => Ok(()),
+            error => Err(error),
+        }
+    }
+
     /// Sets the mask for the geometry.
     ///
     /// This geometry mask is used together with the ray mask stored inside the
