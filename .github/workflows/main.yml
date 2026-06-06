@@ -26,8 +26,8 @@ jobs:
           rustup toolchain install nightly --component miri
           rustup override set nightly
           cargo miri setup
-      - name: Test with Miri
-        run: cargo miri test
+      - name: Test with Miri (pure-Rust tests only; FFI tests cannot run under Miri)
+        run: cargo miri test --lib
   thread_sanitizer:
     runs-on: ubuntu-latest
     continue-on-error: true
