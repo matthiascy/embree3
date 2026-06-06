@@ -10,8 +10,8 @@ use std::{
 };
 
 use embree3::{
-    Allocator, Bounds, BuildConfig, BuildPrimitive, BvhBuilder, BvhNode, BvhResult, ChildBounds,
-    Children, Device, NodePtr,
+    Allocator, Bounds, BuildConfig, BuildPrimitive, BuildQuality, BvhBuilder, BvhNode, BvhResult,
+    ChildBounds, Children, Device, NodePtr,
 };
 
 /// Placeholder bounds written at `create_node` and overwritten by `set_bounds`.
@@ -332,4 +332,181 @@ fn same_bvh_rebuilds_sequentially() {
         c3, 48,
         "the same Bvh must rebuild correctly after an empty rebuild"
     );
+}
+
+#[test]
+fn high_quality_with_spatial_splits_still_covers_all_primitives() {
+    let device = Device::new().unwrap();
+    let mut bvh = device.create_bvh().unwrap();
+    // Large, heavily overlapping prims maximize the SAH overlap cost so the spatial
+    // splitter has strong incentive to split: 16-wide boxes over a 16x16 unit grid,
+    // each overlapping ~16 neighbours.
+    let mut prims: Vec<BuildPrimitive> = (0..256)
+        .map(|i| BuildPrimitive {
+            lower_x: (i % 16) as f32,
+            lower_y: (i / 16) as f32,
+            lower_z: 0.0,
+            geomID: 0,
+            upper_x: (i % 16) as f32 + 16.0,
+            upper_y: (i / 16) as f32 + 16.0,
+            upper_z: 1.0,
+            primID: i,
+        })
+        .collect();
+
+    let cfg = BuildConfig {
+        quality: BuildQuality::HIGH,
+        ..Default::default()
+    };
+    let recorder = Recorder::default();
+
+    // Recorder has SPATIAL_SPLITS = true, so HIGH may trigger splitPrimitive and
+    // the 2x capacity reserve. The leaf primID SET (deduped) must always cover
+    // every input; counts may exceed 256 because a split primitive lands in
+    // multiple leaves.
+    bvh.build_scoped(&cfg, &mut prims, &recorder, |_r| ())
+        .unwrap();
+
+    let ids: HashSet<u32> = recorder.prim_ids.lock().unwrap().iter().copied().collect();
+    let expected: HashSet<u32> = (0..256).collect();
+    assert_eq!(
+        ids, expected,
+        "spatial-split build must still reference every primID"
+    );
+
+    // EMPIRICAL (embree 3.13.5, the version this crate gates on): embree documents
+    // that a split callback makes spatial splitting *possible*, not that every
+    // HIGH build calls it. This dataset (large overlapping prims) reliably
+    // forces splits in 3.13.5, so we assert the enabled split path actually
+    // executes. If a future embree changes the heuristic and this fails, adjust
+    // the dataset rather than dropping the check.
+    assert!(
+        recorder.split_calls.load(Ordering::Relaxed) > 0,
+        "this overlapping dataset is expected to force spatial splits at HIGH on embree 3.13.5"
+    );
+}
+
+#[test]
+fn progress_callback_is_invoked_when_enabled() {
+    let device = Device::new().unwrap();
+    let mut bvh = device.create_bvh().unwrap();
+    let mut prims = make_prims(1024);
+    let cfg = BuildConfig::default();
+    let recorder = Recorder::default(); // PROGRESS = true
+
+    bvh.build_scoped(&cfg, &mut prims, &recorder, |_r| ())
+        .unwrap();
+
+    // Report-only: embree 3.13.5 ignores the return, but it DOES call the monitor.
+    assert!(
+        recorder.progress_calls.load(Ordering::Relaxed) > 0,
+        "progress() must be invoked when PROGRESS == true"
+    );
+}
+
+/// Same node layout as `Recorder` but with both hook consts left at their
+/// `false` defaults, so embree should register neither the split nor the
+/// progress trampoline. The counters detect any (incorrect) invocation.
+#[derive(Default)]
+struct Disabled {
+    split_calls: AtomicUsize,
+    progress_calls: AtomicUsize,
+}
+
+impl BvhBuilder for Disabled {
+    type Node<'id> = Node<'id>;
+    const MAX_CHILDREN: usize = 2;
+    // SPATIAL_SPLITS and PROGRESS default to false.
+
+    fn create_node<'id>(&self, a: &Allocator<'id>, _n: usize) -> &'id mut Node<'id> {
+        a.alloc(Node::Inner {
+            bounds: [EMPTY_BOUNDS; 2],
+            kids: [None; 2],
+        })
+    }
+    fn set_children<'id>(&self, node: &mut Node<'id>, c: Children<'id, Node<'id>>) {
+        if let Node::Inner { kids, .. } = node {
+            for i in 0..c.len().min(2) {
+                kids[i] = c.get(i);
+            }
+        }
+    }
+    fn set_bounds<'id>(&self, node: &mut Node<'id>, bnds: ChildBounds<'_>) {
+        if let Node::Inner { bounds, .. } = node {
+            for i in 0..bnds.len().min(2) {
+                if let Some(cb) = bnds.get(i) {
+                    bounds[i] = *cb;
+                }
+            }
+        }
+    }
+    fn create_leaf<'id>(&self, a: &Allocator<'id>, prims: &[BuildPrimitive]) -> &'id mut Node<'id> {
+        a.alloc(Node::Leaf {
+            prim_count: prims.len() as u32,
+        })
+    }
+    fn split(&self, _p: &BuildPrimitive, _d: u32, _pos: f32) -> (Bounds, Bounds) {
+        self.split_calls.fetch_add(1, Ordering::Relaxed);
+        (EMPTY_BOUNDS, EMPTY_BOUNDS)
+    }
+    fn progress(&self, _f: f64) { self.progress_calls.fetch_add(1, Ordering::Relaxed); }
+}
+
+#[test]
+fn disabled_hooks_are_never_invoked() {
+    let device = Device::new().unwrap();
+    let mut bvh = device.create_bvh().unwrap();
+    let mut prims = make_prims(512);
+    // HIGH would trigger spatial splits IF SPATIAL_SPLITS were true; it is false
+    // here.
+    let cfg = BuildConfig {
+        quality: BuildQuality::HIGH,
+        ..Default::default()
+    };
+    let d = Disabled::default();
+
+    bvh.build_scoped(&cfg, &mut prims, &d, |_r| ()).unwrap();
+
+    assert_eq!(
+        d.split_calls.load(Ordering::Relaxed),
+        0,
+        "split must not run when SPATIAL_SPLITS is false"
+    );
+    assert_eq!(
+        d.progress_calls.load(Ordering::Relaxed),
+        0,
+        "progress must not run when PROGRESS is false"
+    );
+}
+
+#[test]
+fn result_supports_parallel_traversal() {
+    let device = Device::new().unwrap();
+    let mut bvh = device.create_bvh().unwrap();
+    let mut prims = make_prims(256);
+    let cfg = BuildConfig::default();
+    let recorder = Recorder::default();
+
+    // Inside the scope, traverse each root subtree on its own thread. This only
+    // compiles/runs if BvhResult is Sync and Node is Sync (handles are Send).
+    let total = bvh
+        .build_scoped(&cfg, &mut prims, &recorder, |r| match r.root() {
+            None => 0,
+            Some(Node::Leaf { prim_count }) => *prim_count,
+            Some(Node::Inner { kids, .. }) => std::thread::scope(|s| {
+                let handles: Vec<_> = kids
+                    .iter()
+                    .flatten()
+                    .map(|k| {
+                        let rr = &r;
+                        let kk = *k;
+                        s.spawn(move || sum_prims(rr, rr.resolve(kk)))
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).sum::<u32>()
+            }),
+        })
+        .unwrap();
+
+    assert_eq!(total, 256, "parallel traversal must visit every primitive");
 }
