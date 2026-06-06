@@ -23,6 +23,7 @@
 //! | `rtcSetGeometryPointQueryFunction` | [`Scene::point_query`] | Its callback receives no per-geometry pointer (only the scene query's `userPtr`), so it cannot host a capturing closure. Branch on `geomID` inside the [`Scene::point_query`] closure for per-geometry logic. |
 //! | `rtcGetSceneDevice` | [`Scene::device`] | The scene already tracks (and hands back) its [`Device`]; the raw getter would only duplicate it. |
 //! | `rtcSetDeviceProperty` | *(none)* | Embree exposes **no public writable device properties** (the only settable ones are hidden internal debug integers), so a wrapper would reject every public `DeviceProperty`. Use [`Device::get_property`] for the read-only queries. |
+//! | `rtcRetainBVH` | *(none)* | [`Bvh`] is a non-`Clone` build target (the build result borrows it exclusively), so there is never a second handle to retain; `rtcReleaseBVH` runs once in `Drop`. |
 //!
 //! Two further functions, `rtcGetGeometryUserData` and `rtcRetainGeometry`, are
 //! not exposed because the crate's geometry ownership model (an internal `Arc`

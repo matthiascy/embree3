@@ -1,0 +1,7 @@
+[package]
+name = "bvh_builder"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+embree3 = { path = "../../" }

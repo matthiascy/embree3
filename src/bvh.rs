@@ -52,9 +52,7 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::{
-    sys::*, Bounds, BuildFlags, BuildPrimitive, BuildQuality, Device, DeviceProperty, Error,
-};
+use crate::{sys::*, Bounds, BuildPrimitive, BuildQuality, Device, DeviceProperty, Error};
 
 /// A reference-counted standalone BVH (`RTCBVH`). Build target for
 /// [`Bvh::build_scoped`].
@@ -471,7 +469,10 @@ pub trait BvhBuilder: Send + Sync {
 #[derive(Clone, Debug)]
 pub struct BuildConfig {
     pub quality: BuildQuality,
-    pub flags: BuildFlags,
+    /// Optimize the build for fast *rebuilds* of dynamic scenes, at the cost of
+    /// higher memory use (embree's `RTC_BUILD_FLAG_DYNAMIC`). `false`
+    /// builds for best query performance.
+    pub dynamic: bool,
     pub max_branching_factor: u32,
     pub max_depth: u32,
     pub sah_block_size: u32,
@@ -485,7 +486,7 @@ impl Default for BuildConfig {
     fn default() -> Self {
         Self {
             quality: BuildQuality::MEDIUM,
-            flags: BuildFlags::NONE,
+            dynamic: false,
             max_branching_factor: 2,
             max_depth: 32,
             sah_block_size: 1,
@@ -529,9 +530,6 @@ impl BuildConfig {
             || !self.intersection_cost.is_finite()
             || self.intersection_cost <= 0.0
         {
-            return bad;
-        }
-        if (self.flags.0 & !BuildFlags::DYNAMIC.0) != 0 {
             return bad;
         }
         if self.quality == BuildQuality::LOW && prim_count > u32::MAX as usize {
@@ -812,7 +810,11 @@ impl Bvh {
         let mut args: RTCBuildArguments = unsafe { std::mem::zeroed() };
         args.byteSize = std::mem::size_of::<RTCBuildArguments>();
         args.buildQuality = config.quality;
-        args.buildFlags = config.flags;
+        args.buildFlags = if config.dynamic {
+            RTCBuildFlags::DYNAMIC
+        } else {
+            RTCBuildFlags::NONE
+        };
         args.maxBranchingFactor = config.max_branching_factor;
         args.maxDepth = config.max_depth;
         args.sahBlockSize = config.sah_block_size;

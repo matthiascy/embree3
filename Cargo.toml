@@ -32,6 +32,10 @@ criterion = "0.8"
 name = "callback_throughput"
 harness = false
 
+[[bench]]
+name = "bvh_traversal"
+harness = false
+
 [features]
 log = ["dep:log"]
 
