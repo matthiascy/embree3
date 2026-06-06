@@ -233,3 +233,49 @@ fn shared_user_data_is_reached_soundly() {
     eprintln!("bvh build ran callbacks on {n_threads} distinct thread(s)");
     assert!(n_threads >= 1);
 }
+
+#[test]
+fn root_child_bounds_enclose_all_inputs() {
+    let device = Device::new().unwrap();
+    let mut bvh = device.create_bvh().unwrap();
+    // 64 prims with default max_leaf_size (32) forces an Inner root.
+    let mut prims = make_prims(64);
+    let cfg = BuildConfig::default();
+    let recorder = Recorder::default();
+
+    // Union of the root's child bounds, computed inside the scope.
+    let (lo, hi) = bvh
+        .build_scoped(&cfg, &mut prims, &recorder, |r| {
+            match r.root().expect("non-empty build has a root") {
+                Node::Inner { bounds, .. } => {
+                    let mut lo = [f32::INFINITY; 3];
+                    let mut hi = [f32::NEG_INFINITY; 3];
+                    for b in bounds {
+                        lo[0] = lo[0].min(b.lower_x);
+                        lo[1] = lo[1].min(b.lower_y);
+                        lo[2] = lo[2].min(b.lower_z);
+                        hi[0] = hi[0].max(b.upper_x);
+                        hi[1] = hi[1].max(b.upper_y);
+                        hi[2] = hi[2].max(b.upper_z);
+                    }
+                    (lo, hi)
+                }
+                Node::Leaf { .. } => panic!("expected an inner root for 64 primitives"),
+            }
+        })
+        .unwrap();
+
+    // Input union is x in [0, 64], y in [0, 1], z in [0, 1].
+    assert!(
+        lo[0] <= 0.0 && hi[0] >= 64.0,
+        "x not enclosed: {lo:?}..{hi:?}"
+    );
+    assert!(
+        lo[1] <= 0.0 && hi[1] >= 1.0,
+        "y not enclosed: {lo:?}..{hi:?}"
+    );
+    assert!(
+        lo[2] <= 0.0 && hi[2] >= 1.0,
+        "z not enclosed: {lo:?}..{hi:?}"
+    );
+}
