@@ -279,3 +279,57 @@ fn root_child_bounds_enclose_all_inputs() {
         "z not enclosed: {lo:?}..{hi:?}"
     );
 }
+
+#[test]
+fn empty_input_yields_none_root() {
+    let device = Device::new().unwrap();
+    let mut bvh = device.create_bvh().unwrap();
+    let mut prims: Vec<BuildPrimitive> = Vec::new();
+    let cfg = BuildConfig::default();
+    let recorder = Recorder::default();
+
+    let is_none = bvh
+        .build_scoped(&cfg, &mut prims, &recorder, |r| r.root().is_none())
+        .unwrap();
+
+    assert!(is_none, "empty input must yield root() == None");
+    // The short-circuit means embree was never called, so no leaf was created.
+    assert_eq!(recorder.leaves.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn same_bvh_rebuilds_sequentially() {
+    let device = Device::new().unwrap();
+    let mut bvh = device.create_bvh().unwrap();
+    let cfg = BuildConfig::default();
+    let recorder = Recorder::default();
+
+    // 1) non-empty
+    let mut p1 = make_prims(32);
+    let c1 = bvh
+        .build_scoped(&cfg, &mut p1, &recorder, |r| {
+            r.root().map(|n| sum_prims(&r, n)).unwrap_or(0)
+        })
+        .unwrap();
+    assert_eq!(c1, 32);
+
+    // 2) empty on the SAME bvh (deferred arena reset path)
+    let mut p2: Vec<BuildPrimitive> = Vec::new();
+    let empty = bvh
+        .build_scoped(&cfg, &mut p2, &recorder, |r| r.root().is_none())
+        .unwrap();
+    assert!(empty, "empty rebuild must yield None");
+
+    // 3) non-empty again on the SAME bvh; must build correctly after the empty
+    //    rebuild
+    let mut p3 = make_prims(48);
+    let c3 = bvh
+        .build_scoped(&cfg, &mut p3, &recorder, |r| {
+            r.root().map(|n| sum_prims(&r, n)).unwrap_or(0)
+        })
+        .unwrap();
+    assert_eq!(
+        c3, 48,
+        "the same Bvh must rebuild correctly after an empty rebuild"
+    );
+}
