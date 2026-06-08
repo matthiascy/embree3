@@ -77,7 +77,8 @@ fn overlapping_user_boxes_report_a_collision_pair() {
                 cs.iter()
                     .map(|c| (c.geomID0, c.primID0, c.geomID1, c.primID1)),
             );
-        });
+        })
+        .expect("collide preconditions hold (same device, non-empty, user geometries)");
     }
 
     let v = pairs.lock().unwrap();
@@ -111,7 +112,8 @@ fn broad_phase_is_conservative_user_does_narrow_phase() {
     unsafe {
         s0.collide(&s1, move |cs: &mut [Collision]| {
             c.fetch_add(cs.len(), Relaxed);
-        });
+        })
+        .expect("collide preconditions hold");
     }
 
     assert!(
@@ -141,7 +143,8 @@ fn many_primitives_collide_soundly_under_concurrency() {
         s0.collide(&s1, move |cs: &mut [Collision]| {
             c.fetch_add(cs.len(), Relaxed);
             t.lock().unwrap().insert(std::thread::current().id());
-        });
+        })
+        .expect("collide preconditions hold");
     }
 
     assert!(
@@ -174,13 +177,15 @@ fn self_collision_omits_identical_primitive_pairs() {
     // SAFETY: committed, one device, single-time-step user geometries, non-empty,
     // same scene (so identical BVH layout). The callback does not mutate the scene.
     unsafe {
-        scene.collide(&scene, move |cs: &mut [Collision]| {
-            let mut v = sink.lock().unwrap();
-            v.extend(
-                cs.iter()
-                    .map(|c| (c.geomID0, c.primID0, c.geomID1, c.primID1)),
-            );
-        });
+        scene
+            .collide(&scene, move |cs: &mut [Collision]| {
+                let mut v = sink.lock().unwrap();
+                v.extend(
+                    cs.iter()
+                        .map(|c| (c.geomID0, c.primID0, c.geomID1, c.primID1)),
+                );
+            })
+            .expect("collide preconditions hold");
     }
 
     let v = pairs.lock().unwrap();
@@ -191,5 +196,41 @@ fn self_collision_omits_identical_primitive_pairs() {
     assert!(
         v.iter().all(|&(g0, p0, g1, p1)| !(g0 == g1 && p0 == p1)),
         "embree must omit (primitive, same primitive) self-pairs, got {v:?}"
+    );
+}
+
+#[test]
+fn collide_rejects_invalid_inputs_before_calling_embree() {
+    // The wrapper checks the cheap preconditions and returns `Err` *before*
+    // reaching `rtcCollide`, so none of these calls is actually UB. This proves
+    // the runtime guard added on top of the `unsafe` contract.
+    let device = common::device();
+    let g = user_box(&device, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+    let populated = committed_scene(&device, &g);
+
+    // Empty scene (no attached geometry) -> Err, on either side.
+    let mut empty = device.create_scene().unwrap();
+    empty.commit();
+    // SAFETY: same device, both committed; the guard rejects the empty scene
+    // before any embree call, so no precondition is actually violated.
+    let r = unsafe { populated.collide(&empty, |_cs: &mut [Collision]| {}) };
+    assert!(r.is_err(), "collide must reject an empty `other` scene");
+    let r = unsafe { empty.collide(&populated, |_cs: &mut [Collision]| {}) };
+    assert!(r.is_err(), "collide must reject an empty `self` scene");
+
+    // A non-user geometry (triangle) -> Err.
+    let tri = common::unit_triangle(&device).commit();
+    let tri_scene = committed_scene(&device, &tri);
+    let r = unsafe { populated.collide(&tri_scene, |_cs: &mut [Collision]| {}) };
+    assert!(r.is_err(), "collide must reject a non-user geometry");
+
+    // Two scenes from different devices -> Err.
+    let device2 = common::device();
+    let g2 = user_box(&device2, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+    let other_device_scene = committed_scene(&device2, &g2);
+    let r = unsafe { populated.collide(&other_device_scene, |_cs: &mut [Collision]| {}) };
+    assert!(
+        r.is_err(),
+        "collide must reject scenes created on different devices"
     );
 }

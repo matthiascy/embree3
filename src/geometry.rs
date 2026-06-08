@@ -881,6 +881,18 @@ impl<'buf> GeometryBuilder<'buf> {
     /// on exclusive `&mut` access to its captures, and everything it captures
     /// must be `Send + Sync`. The `Fn + Send + Sync` bounds on the closure
     /// enforce this.
+    ///
+    /// # Performance
+    ///
+    /// The [`RayN`]/[`HitN`]/[`ValidityN`] accessors bounds-check every field
+    /// access unconditionally (they `assert!`, even in release). When the
+    /// closure iterates the packet over a lane index it has already proven in
+    /// range (e.g. `for i in 0..rays.len()`), that check is redundant; the
+    /// `unsafe` [`RayN::gather_unchecked`] / [`HitN::gather_unchecked`] /
+    /// [`HitN::scatter_unchecked`] / [`ValidityN::get_unchecked`] /
+    /// [`ValidityN::set_unchecked`] accessors skip it (the user-geometry
+    /// callbacks get the same elision automatically via
+    /// [`IntersectFunctionNArgs::for_each_active_lane`]).
     pub fn set_intersect_filter_function<F, D>(&mut self, filter: F)
     where
         D: UserData,
@@ -3772,6 +3784,33 @@ impl<'a> ValidityN<'a> {
     pub const fn len(&self) -> usize { self.len }
 
     pub const fn is_empty(&self) -> bool { self.len == 0 }
+
+    /// Read lane `i`'s validity flag (`-1` valid, `0` invalid) **with no bounds
+    /// check**.
+    ///
+    /// The unchecked counterpart of [`Index`]: a filter callback iterating over
+    /// an already-proven-in-range lane index can skip the per-access `assert!`
+    /// the [`Index`] impl does unconditionally (including in release).
+    /// `#[inline(always)]` so it lowers to a single load.
+    ///
+    /// # Safety
+    ///
+    /// `i < self.len()`.
+    #[inline(always)]
+    pub unsafe fn get_unchecked(&self, i: usize) -> i32 { *self.ptr.add(i) }
+
+    /// Set lane `i`'s validity flag (e.g. `0` to reject the lane) **with no
+    /// bounds check**; the unchecked counterpart of [`IndexMut`].
+    ///
+    /// # Safety
+    ///
+    /// `i < self.len()`. (Like the [`IndexMut`] impl, this writes through the
+    /// view's pointer, which embree provides with write provenance for filter
+    /// callbacks.)
+    #[inline(always)]
+    pub unsafe fn set_unchecked(&mut self, i: usize, valid: i32) {
+        *(self.ptr.add(i) as *mut i32) = valid;
+    }
 }
 
 impl<'a> Index<usize> for ValidityN<'a> {
@@ -3899,5 +3938,21 @@ mod validity_oob_tests {
         // Each lane got a distinct `&mut` (no aliasing); the `'b`-tied lifetime is
         // what prevents a yielded reference from escaping the iterator.
         assert_eq!(buf, [0, 1, 2, 3]);
+    }
+
+    // The unchecked accessors (the perf escape hatch for filter callbacks) must
+    // agree with the checked `Index`/`IndexMut`, including write-back.
+    #[test]
+    fn get_set_unchecked_matches_checked() {
+        let mut buf = [-1i32, 0, -1, 0];
+        let mut v = validity_over_mut(&mut buf);
+        for i in 0..v.len() {
+            assert_eq!(unsafe { v.get_unchecked(i) }, v[i]);
+        }
+        unsafe { v.set_unchecked(1, -1) };
+        unsafe { v.set_unchecked(2, 0) };
+        assert_eq!(v[1], -1);
+        assert_eq!(v[2], 0);
+        assert_eq!(buf, [-1, -1, 0, 0]);
     }
 }

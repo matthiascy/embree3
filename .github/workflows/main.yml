@@ -59,6 +59,7 @@ jobs:
         run: >
           cargo test -Zbuild-std --target x86_64-unknown-linux-gnu
           --test callback_concurrency --test concurrent_bounds --test bvh_builder --test collide
+          --test arc_scene_concurrent
   # Hard gate: ASan instruments this crate's code, so a use-after-free / OOB in
   # our FFI usage fails the build regardless of embree being uninstrumented. (LSan
   # leak reports rooted in embree/oneTBB are suppressed -- see lsan-suppressions.txt;

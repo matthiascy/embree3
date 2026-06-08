@@ -1,6 +1,6 @@
 [package]
 name = "embree3"
-version = "0.3.7"
+version = "0.4.0"
 authors = [
     "Will Usher <will@willusher.io>",
     "Yang Chen <matthiasychen@gmail.com>",
@@ -27,6 +27,8 @@ log = { version = "0.4", optional = true }
 
 [dev-dependencies]
 criterion = "0.8"
+# See tests/compile_fail.rs.
+trybuild = "1.0"
 
 [[bench]]
 name = "callback_throughput"

@@ -1,8 +1,8 @@
 use crate::{
     callback::ErasedFn, AsIntersectContext, Bounds, BufferData, BufferUsage, BuildQuality,
-    Collision, Error, Format, LinearBounds, PointQuery, PointQuery16, PointQuery4, PointQuery8,
-    PointQueryContext, Ray, Ray16, Ray8, RayHit, RayHit16, RayHit8, RayHitNp, RayHitPacket,
-    RayPacket, SceneFlags, ValidMask,
+    Collision, Error, Format, GeometryKind, LinearBounds, PointQuery, PointQuery16, PointQuery4,
+    PointQuery8, PointQueryContext, Ray, Ray16, Ray8, RayHit, RayHit16, RayHit8, RayHitNp,
+    RayHitPacket, RayPacket, SceneFlags, ValidMask,
 };
 use std::{collections::HashMap, mem};
 
@@ -1166,18 +1166,29 @@ impl<'a> Scene<'a> {
     /// Each invocation gets its own batch, so the `&mut` slice never aliases
     /// across threads.
     ///
+    /// # Errors
+    ///
+    /// embree validates the preconditions only in debug builds, and even then
+    /// incompletely (its geometry check uses `&&`, so it misses the case where
+    /// only *one* scene is invalid), so this wrapper checks the cheap ones up
+    /// front and returns [`Error::INVALID_ARGUMENT`] **before** calling embree
+    /// when:
+    /// - the two scenes were created on **different devices**;
+    /// - either scene has **no attached geometry** (an empty scene is an
+    ///   `AccelN`, but the collider casts both scenes' acceleration structures
+    ///   to a single `BVH`); or
+    /// - either scene contains a **non-user geometry** (the collider only
+    ///   understands user geometries).
+    ///
     /// # Safety
     ///
-    /// embree validates these only in debug builds, and even then incompletely
-    /// (its geometry check uses `&&`, so it misses the case where only *one*
-    /// scene is invalid). The caller must guarantee all of:
+    /// The checks above do not cover everything embree requires. The caller
+    /// must still guarantee all of:
     /// - both scenes are **committed** (since their last modification);
-    /// - both were created on the **same [`Device`](crate::Device)**;
-    /// - both contain **only user geometries**, each with a **single time
-    ///   step**;
-    /// - both are **non-empty** (at least one enabled primitive). embree
-    ///   represents an empty (or multi-accel) scene with an `AccelN`, but the
-    ///   collider casts both scenes' acceleration structures to a single `BVH`;
+    /// - each geometry has a **single time step** (not checked here);
+    /// - each scene has **at least one enabled, non-degenerate primitive** (the
+    ///   `# Errors` check only rejects a scene with *no* geometry, not one
+    ///   whose geometries are all disabled or zero-primitive);
     /// - both use the **same BVH layout** -- in particular the same `COMPACT`
     ///   scene flag. embree picks one collider (`BVH4` vs `BVH8`, which differ
     ///   on AVX hardware) from `self` and applies it to *both* scenes' nodes,
@@ -1186,13 +1197,30 @@ impl<'a> Scene<'a> {
     ///   either scene (or their geometries) while `collide` is running.
     ///
     /// Violating any of these is undefined behavior in a release embree. (A
-    /// fully safe wrapper would have to track per-scene committed state,
-    /// time-step counts, emptiness, and BVH layout; until then this is
-    /// `unsafe`.)
-    pub unsafe fn collide<F>(&self, other: &Scene, callback: F)
+    /// fully safe wrapper would have to also track per-scene committed state,
+    /// time-step counts, per-geometry enablement, and BVH layout; until then
+    /// this is `unsafe`.)
+    pub unsafe fn collide<F>(&self, other: &Scene<'a>, callback: F) -> Result<(), Error>
     where
         F: Fn(&mut [Collision]) + Sync,
     {
+        // Cheap, safe preconditions the wrapper can check without tracking extra
+        // state. The remaining ones stay in the `# Safety` contract above.
+        if self.device.handle != other.device.handle {
+            return Err(Error::INVALID_ARGUMENT);
+        }
+        if self.geometries.is_empty() || other.geometries.is_empty() {
+            return Err(Error::INVALID_ARGUMENT);
+        }
+        if self
+            .geometries
+            .values()
+            .chain(other.geometries.values())
+            .any(|g| g.shared.kind != GeometryKind::USER)
+        {
+            return Err(Error::INVALID_ARGUMENT);
+        }
+
         // The callback fires on embree's worker threads and `rtcCollide` blocks until
         // done, so `callback` only needs to live for this call: pass a pointer
         // to it directly (no heap ownership). The trampoline is monomorphized
@@ -1227,6 +1255,7 @@ impl<'a> Scene<'a> {
                 &callback as *const F as *mut std::os::raw::c_void,
             );
         }
+        Ok(())
     }
 
     /// Returns the axis-aligned bounding box of the scene.

@@ -1,0 +1,7 @@
+error[E0596]: cannot borrow data in an `Arc` as mutable
+  --> tests/compile_fail/scene_no_mutation_through_arc.rs:17:5
+   |
+17 |     scene.commit();
+   |     ^^^^^ cannot borrow as mutable
+   |
+   = help: trait `DerefMut` is required to modify through a dereference, but it is not implemented for `Arc<Scene<'_>>`

@@ -439,16 +439,20 @@ impl<'a> SoARay for RayN<'a> {
 impl<'a> RayN<'a> {
     /// Gather lane `i` into a single-ray [`Ray`] **with no bounds check**.
     ///
-    /// `#[inline(always)]` so the SoA reads inline into the caller (a
-    /// proven-in-range lane handle), leaving no out-of-line call or per-field
-    /// `cmp`/panic branch. The column offsets match the checked [`SoARay`]
-    /// accessors above (a unit test asserts they agree).
+    /// The checked [`SoARay`] accessors bounds-check every field access
+    /// unconditionally (they `assert!`, even in release). When a filter
+    /// callback iterates the packet over a lane index it has already proven
+    /// in range (e.g. `for i in 0..rays.len()`), that per-field check is
+    /// redundant; this reads the whole ray in one shot with no check.
+    /// `#[inline(always)]` so the SoA reads inline into the caller with no
+    /// out-of-line call or per-field `cmp`/panic branch. The column offsets
+    /// match the checked accessors above (a unit test asserts they agree).
     ///
     /// # Safety
     ///
     /// `i < self.len()`.
     #[inline(always)]
-    pub(crate) unsafe fn gather_unchecked(&self, i: usize) -> Ray {
+    pub unsafe fn gather_unchecked(&self, i: usize) -> Ray {
         let n = self.len;
         let f = self.ptr as *const f32;
         let u = self.ptr as *const u32;
@@ -468,13 +472,14 @@ impl<'a> RayN<'a> {
         }
     }
 
-    /// Scatter `tfar` into lane `i` **with no bounds check**.
+    /// Scatter `tfar` into lane `i` **with no bounds check** (the unchecked
+    /// counterpart of [`SoARay::set_tfar`]).
     ///
     /// # Safety
     ///
     /// `i < self.len()`.
     #[inline(always)]
-    pub(crate) unsafe fn set_tfar_unchecked(&mut self, i: usize, tfar: f32) {
+    pub unsafe fn set_tfar_unchecked(&mut self, i: usize, tfar: f32) {
         *(self.ptr as *mut f32).add(8 * self.len + i) = tfar;
     }
 }
@@ -601,6 +606,35 @@ impl<'a> HitN<'a> {
     /// Returns true if the packet is empty.
     pub const fn is_empty(&self) -> bool { self.len == 0 }
 
+    /// Gather lane `i`'s candidate hit into a single [`Hit`] **with no bounds
+    /// check**.
+    ///
+    /// The unchecked-read counterpart of the [`SoAHit`] accessors, for a filter
+    /// callback iterating over an already-proven-in-range lane index: it reads
+    /// the whole hit in one shot, skipping the per-field `assert!` the checked
+    /// accessors do in release. Column offsets match the checked accessors (a
+    /// unit test asserts they agree).
+    ///
+    /// # Safety
+    ///
+    /// `i < self.len()`.
+    #[inline(always)]
+    pub unsafe fn gather_unchecked(&self, i: usize) -> Hit {
+        let n = self.len;
+        let f = self.ptr as *const f32;
+        let u = self.ptr as *const u32;
+        Hit {
+            Ng_x: *f.add(i),
+            Ng_y: *f.add(n + i),
+            Ng_z: *f.add(2 * n + i),
+            u: *f.add(3 * n + i),
+            v: *f.add(4 * n + i),
+            primID: *u.add(5 * n + i),
+            geomID: *u.add(6 * n + i),
+            instID: [*u.add(7 * n + i)],
+        }
+    }
+
     /// Scatter a single [`Hit`] into lane `i` **with no bounds check**.
     ///
     /// `#[inline(always)]` so the SoA writes inline into the caller (a
@@ -611,7 +645,7 @@ impl<'a> HitN<'a> {
     ///
     /// `i < self.len()`.
     #[inline(always)]
-    pub(crate) unsafe fn scatter_unchecked(&mut self, i: usize, hit: &Hit) {
+    pub unsafe fn scatter_unchecked(&mut self, i: usize, hit: &Hit) {
         let n = self.len;
         let f = self.ptr as *mut f32;
         let u = self.ptr as *mut u32;
@@ -758,5 +792,40 @@ mod oob_tests {
         assert_eq!(view.prim_id(2), 7);
         assert_eq!(view.geom_id(2), 9);
         assert_eq!(view.inst_id(2), 11);
+    }
+
+    #[test]
+    fn gather_unchecked_matches_checked_hit() {
+        // Round-trips a known hit through the checked setters, then reads it back
+        // with the unchecked gather: the column offsets of `HitN::gather_unchecked`
+        // must agree with the checked `SoAHit` accessors.
+        let mut h4 = Hit4::new();
+        let mut view = HitN {
+            ptr: &mut h4 as *mut Hit4 as *mut sys::RTCHitN,
+            len: 4,
+            marker: PhantomData,
+        };
+        let hit = Hit {
+            Ng_x: 1.0,
+            Ng_y: 2.0,
+            Ng_z: 3.0,
+            u: 0.5,
+            v: 0.6,
+            primID: 7,
+            geomID: 9,
+            instID: [11],
+        };
+        view.set_normal(1, [hit.Ng_x, hit.Ng_y, hit.Ng_z]);
+        view.set_uv(1, [hit.u, hit.v]);
+        view.set_prim_id(1, hit.primID);
+        view.set_geom_id(1, hit.geomID);
+        view.set_inst_id(1, hit.instID[0]);
+
+        let g = unsafe { view.gather_unchecked(1) };
+        assert_eq!([g.Ng_x, g.Ng_y, g.Ng_z], view.normal(1));
+        assert_eq!([g.u, g.v], view.uv(1));
+        assert_eq!(g.primID, view.prim_id(1));
+        assert_eq!(g.geomID, view.geom_id(1));
+        assert_eq!(g.instID[0], view.inst_id(1));
     }
 }
