@@ -10,14 +10,24 @@ documentation = "https://docs.rs/embree3/"
 repository = "https://github.com/matthiascy/embree3"
 readme = "README.md"
 license = "MIT"
-description = """
-A wrapper for the Embree ray tracing kernels.
-"""
-keywords = ["embree", "ray", "simd", "bvh"]
+description = "Safe Rust bindings to Embree 3.13.5, Intel's high-performance ray-tracing kernels."
+keywords = ["embree", "ray-tracing", "graphics", "bvh", "ffi"]
+categories = ["rendering", "api-bindings", "external-ffi-bindings"]
 build = "build.rs"
 edition = "2021"
 
-exclude = [".travis.yml", "*.png", ".gitignore", "examples/*"]
+# Keep the published crate to the library itself: src/, build.rs, tests, benches,
+# README/CHANGELOG/LICENSE. Everything below is local-dev, agent, or CI-only
+# tooling that consumers neither need nor should receive.
+exclude = [
+    ".*",
+    "*.png",
+    "examples/*",
+    "scripts",
+    "rustfmt.toml",
+    "tsan-suppressions.txt",
+    "lsan-suppressions.txt",
+]
 
 [dependencies]
 # Optional: when enabled, the default error reporter routes embree's asynchronous
