@@ -187,6 +187,13 @@ impl<'buf> Drop for GeometryShared<'buf> {
 // read is what makes the writes visible (see the module invariant). So a shared
 // `&Geometry` only ever observes frozen state. The boxed `F`/`D` are
 // `Send + Sync` (enforced at registration).
+//
+// `Send` is intentionally NOT implemented here. That `!Send` is load-bearing:
+// it keeps `Arc<GeometryShared>` `!Sync`, which is the only thing keeping
+// `GeometryBuilder` `!Sync` (a builder must not be shared across
+// threads while it mutates its `UnsafeCell`s via `&mut`). `Geometry` opts into
+// `Send`/`Sync` at the wrapper instead; see the `arc_with_non_send_sync` note
+// at the `Arc::new` site in `Geometry::new`.
 unsafe impl Sync for GeometryShared<'_> {}
 
 impl<'buf> GeometryShared<'buf> {
@@ -240,7 +247,7 @@ impl<'buf> GeometryShared<'buf> {
         if ptr.is_null()
             || t_size == 0
             || byte_size % t_size != 0
-            || (ptr as usize) % std::mem::align_of::<T>() != 0
+            || (ptr as usize) & (std::mem::align_of::<T>() - 1) != 0
         {
             return Err(Error::INVALID_ARGUMENT);
         }
@@ -349,7 +356,7 @@ impl<'buf> GeometryBuilder<'buf> {
         let vertex = matches!(usage, BufferUsage::VERTEX | BufferUsage::VERTEX_ATTRIBUTE);
         let req =
             required_layout_bytes(format, stride, count, vertex).ok_or(Error::INVALID_ARGUMENT)?;
-        if data.len() < req || (data.as_ptr() as usize) % 4 != 0 {
+        if data.len() < req || (data.as_ptr() as usize) & 3 != 0 {
             return Err(Error::INVALID_ARGUMENT);
         }
         unsafe {
@@ -421,6 +428,7 @@ impl<'buf> GeometryBuilder<'buf> {
     /// this does not constrain the geometry's lifetime. `byte_range`'s
     /// start is the byte offset (must be 4-byte aligned); the range must
     /// lie within the buffer and be long enough for the layout.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_managed_buffer<S: RangeBounds<usize>>(
         &mut self,
         usage: BufferUsage,
@@ -580,7 +588,7 @@ impl<'buf> GeometryBuilder<'buf> {
         if raw_ptr.is_null() {
             return Err(self.shared.device.get_error());
         }
-        if (raw_ptr as usize) % std::mem::align_of::<T>() != 0 {
+        if (raw_ptr as usize) & (std::mem::align_of::<T>() - 1) != 0 {
             return Err(Error::INVALID_ARGUMENT);
         }
         let layout = BufferLayout {
@@ -1006,7 +1014,7 @@ impl<'buf> GeometryBuilder<'buf> {
         // `GeometryShared<'buf>` already *uses* `'buf` (via `AttachedBuffer::Shared`);
         // keep it so (a `PhantomData<&'buf ()>` if needed) so the erased `*const ()` is
         // not silently `'static`.
-        let ptr = &*data as *const D as *const ();
+        let ptr = data as *const D as *const ();
         unsafe {
             rtcSetGeometryIntersectFilterFunction(
                 self.shared.handle,
@@ -1127,7 +1135,7 @@ impl<'buf> GeometryBuilder<'buf> {
         // `GeometryShared<'buf>` already *uses* `'buf` (via `AttachedBuffer::Shared`);
         // keep it so (a `PhantomData<&'buf ()>` if needed) so the erased `*const ()` is
         // not silently `'static`.
-        let ptr = &*data as *const D as *const ();
+        let ptr = data as *const D as *const ();
         unsafe {
             rtcSetGeometryOccludedFilterFunction(
                 self.shared.handle,
@@ -1191,8 +1199,8 @@ impl<'buf> GeometryBuilder<'buf> {
         D: UserData,
         F: Fn(&mut Bounds, u32, u32, Option<&D>) + Send + Sync + 'static,
     {
-        match self.shared.kind {
-            GeometryKind::USER => unsafe {
+        if self.shared.kind == GeometryKind::USER {
+            unsafe {
                 rtcSetGeometryBoundsFunction(
                     self.shared.handle,
                     trampoline::bounds_function::<F, D>(),
@@ -1204,9 +1212,7 @@ impl<'buf> GeometryBuilder<'buf> {
                     std::ptr::null(),
                     None,
                 );
-            },
-            // Bounds functions apply only to user geometry; ignored otherwise.
-            _ => {}
+            }
         }
     }
 
@@ -1219,21 +1225,17 @@ impl<'buf> GeometryBuilder<'buf> {
         D: UserData,
         F: Fn(&mut Bounds, u32, u32, Option<&D>) + Send + Sync + 'static,
     {
-        match self.shared.kind {
-            GeometryKind::USER => {
-                let boxed = Box::new(data);
-                let ptr = &*boxed as *const D as *const ();
-                unsafe {
-                    rtcSetGeometryBoundsFunction(
-                        self.shared.handle,
-                        trampoline::bounds_function::<F, D>(),
-                        ptr::null_mut(),
-                    );
-                }
-                self.install_callback(CbKind::UserBounds, ErasedFn::new(bounds), ptr, Some(boxed));
+        if self.shared.kind == GeometryKind::USER {
+            let boxed = Box::new(data);
+            let ptr = &*boxed as *const D as *const ();
+            unsafe {
+                rtcSetGeometryBoundsFunction(
+                    self.shared.handle,
+                    trampoline::bounds_function::<F, D>(),
+                    ptr::null_mut(),
+                );
             }
-            // Bounds functions apply only to user geometry; ignored otherwise.
-            _ => {}
+            self.install_callback(CbKind::UserBounds, ErasedFn::new(bounds), ptr, Some(boxed));
         }
     }
 
@@ -1246,41 +1248,36 @@ impl<'buf> GeometryBuilder<'buf> {
         D: UserData,
         F: Fn(&mut Bounds, u32, u32, Option<&D>) + Send + Sync + 'static,
     {
-        match self.shared.kind {
-            GeometryKind::USER => {
-                let ptr = data as *const D as *const ();
-                unsafe {
-                    rtcSetGeometryBoundsFunction(
-                        self.shared.handle,
-                        trampoline::bounds_function::<F, D>(),
-                        ptr::null_mut(),
-                    );
-                }
-                self.install_callback(CbKind::UserBounds, ErasedFn::new(bounds), ptr, None);
+        if self.shared.kind == GeometryKind::USER {
+            let ptr = data as *const D as *const ();
+            unsafe {
+                rtcSetGeometryBoundsFunction(
+                    self.shared.handle,
+                    trampoline::bounds_function::<F, D>(),
+                    ptr::null_mut(),
+                );
             }
-            // Bounds functions apply only to user geometry; ignored otherwise.
-            _ => {}
+            self.install_callback(CbKind::UserBounds, ErasedFn::new(bounds), ptr, None);
         }
     }
 
     /// Unsets the callback to calculate the bounding box of user-defined
     /// geometry.
     pub fn unset_bounds_function(&mut self) {
-        match self.shared.kind {
-            GeometryKind::USER => unsafe {
+        if self.shared.kind == GeometryKind::USER {
+            unsafe {
                 rtcSetGeometryBoundsFunction(self.shared.handle, None, ptr::null_mut());
                 self.clear_callback(CbKind::UserBounds);
-            },
-            _ => {}
+            }
         }
     }
 
     /// Sets the callback function to intersect a user geometry.
     ///
-    /// The registered
-    ///   callback function is invoked by intersect-type ray queries to
-    ///   calculate the intersection of a ray packet of variable size with one
-    ///   user-defined primitive.
+    /// The registered callback function is invoked by intersect-type ray
+    /// queries to calculate the intersection of a ray packet of variable
+    /// size with one user-defined primitive.
+    ///
     /// Only a single callback function can be registered per geometry and
     /// further invocations overwrite the previously set callback function.
     /// Unregister the callback function by calling
@@ -1407,8 +1404,8 @@ impl<'buf> GeometryBuilder<'buf> {
         D: UserData,
         F: for<'a> Fn(&mut IntersectFunctionNArgs<'a, D>) + Send + Sync + 'static,
     {
-        match self.shared.kind {
-            GeometryKind::USER => unsafe {
+        if self.shared.kind == GeometryKind::USER {
+            unsafe {
                 rtcSetGeometryIntersectFunction(
                     self.shared.handle,
                     trampoline::intersect_function::<F, D>(),
@@ -1419,9 +1416,7 @@ impl<'buf> GeometryBuilder<'buf> {
                     std::ptr::null(),
                     None,
                 );
-            },
-            // Intersect functions apply only to user geometry; ignored otherwise.
-            _ => {}
+            }
         }
     }
 
@@ -1434,23 +1429,21 @@ impl<'buf> GeometryBuilder<'buf> {
         D: UserData,
         F: for<'a> Fn(&mut IntersectFunctionNArgs<'a, D>) + Send + Sync + 'static,
     {
-        match self.shared.kind {
-            GeometryKind::USER => unsafe {
-                let boxed = Box::new(data);
-                let ptr = &*boxed as *const D as *const ();
+        if self.shared.kind == GeometryKind::USER {
+            let boxed = Box::new(data);
+            let ptr = &*boxed as *const D as *const ();
+            unsafe {
                 rtcSetGeometryIntersectFunction(
                     self.shared.handle,
                     trampoline::intersect_function::<F, D>(),
                 );
-                self.install_callback(
-                    CbKind::UserIntersect,
-                    ErasedFn::new(intersect),
-                    ptr,
-                    Some(boxed),
-                );
-            },
-            // Intersect functions apply only to user geometry; ignored otherwise.
-            _ => {}
+            }
+            self.install_callback(
+                CbKind::UserIntersect,
+                ErasedFn::new(intersect),
+                ptr,
+                Some(boxed),
+            );
         }
     }
 
@@ -1463,29 +1456,25 @@ impl<'buf> GeometryBuilder<'buf> {
         D: UserData,
         F: for<'a> Fn(&mut IntersectFunctionNArgs<'a, D>) + Send + Sync + 'static,
     {
-        match self.shared.kind {
-            GeometryKind::USER => unsafe {
+        if self.shared.kind == GeometryKind::USER {
+            unsafe {
                 let ptr = data as *const D as *const ();
                 rtcSetGeometryIntersectFunction(
                     self.shared.handle,
                     trampoline::intersect_function::<F, D>(),
                 );
                 self.install_callback(CbKind::UserIntersect, ErasedFn::new(intersect), ptr, None);
-            },
-            // Intersect functions apply only to user geometry; ignored otherwise.
-            _ => {}
+            }
         }
     }
 
     /// Unsets the callback to intersect user-defined geometry.
     pub fn unset_intersect_function(&mut self) {
-        match self.shared.kind {
-            GeometryKind::USER => unsafe {
+        if self.shared.kind == GeometryKind::USER {
+            unsafe {
                 rtcSetGeometryIntersectFunction(self.shared.handle, None);
-                self.clear_callback(CbKind::UserIntersect);
-            },
-            // Intersect functions apply only to user geometry; ignored otherwise.
-            _ => {}
+            }
+            self.clear_callback(CbKind::UserIntersect);
         }
     }
 
@@ -1539,23 +1528,19 @@ impl<'buf> GeometryBuilder<'buf> {
         D: UserData,
         F: for<'a> Fn(&mut OccludedFunctionNArgs<'a, D>) + Send + Sync + 'static,
     {
-        match self.shared.kind {
-            GeometryKind::USER => {
-                unsafe {
-                    rtcSetGeometryOccludedFunction(
-                        self.shared.handle,
-                        trampoline::occluded_function::<F, D>(),
-                    )
-                };
-                self.install_callback(
-                    CbKind::UserOccluded,
-                    ErasedFn::new(occluded),
-                    std::ptr::null(),
-                    None,
-                );
-            }
-            // Occluded functions apply only to user geometry; ignored otherwise.
-            _ => {}
+        if self.shared.kind == GeometryKind::USER {
+            unsafe {
+                rtcSetGeometryOccludedFunction(
+                    self.shared.handle,
+                    trampoline::occluded_function::<F, D>(),
+                )
+            };
+            self.install_callback(
+                CbKind::UserOccluded,
+                ErasedFn::new(occluded),
+                std::ptr::null(),
+                None,
+            );
         }
     }
 
@@ -1568,25 +1553,21 @@ impl<'buf> GeometryBuilder<'buf> {
         D: UserData,
         F: for<'a> Fn(&mut OccludedFunctionNArgs<'a, D>) + Send + Sync + 'static,
     {
-        match self.shared.kind {
-            GeometryKind::USER => {
-                let boxed = Box::new(data);
-                let ptr = &*boxed as *const D as *const ();
-                unsafe {
-                    rtcSetGeometryOccludedFunction(
-                        self.shared.handle,
-                        trampoline::occluded_function::<F, D>(),
-                    )
-                };
-                self.install_callback(
-                    CbKind::UserOccluded,
-                    ErasedFn::new(occluded),
-                    ptr,
-                    Some(boxed),
-                );
-            }
-            // Occluded functions apply only to user geometry; ignored otherwise.
-            _ => {}
+        if self.shared.kind == GeometryKind::USER {
+            let boxed = Box::new(data);
+            let ptr = &*boxed as *const D as *const ();
+            unsafe {
+                rtcSetGeometryOccludedFunction(
+                    self.shared.handle,
+                    trampoline::occluded_function::<F, D>(),
+                )
+            };
+            self.install_callback(
+                CbKind::UserOccluded,
+                ErasedFn::new(occluded),
+                ptr,
+                Some(boxed),
+            );
         }
     }
 
@@ -1601,38 +1582,32 @@ impl<'buf> GeometryBuilder<'buf> {
     ///   occlusion queries to test whether the rays of a packet of variable
     ///   size are occluded by a user-defined primitive.
     /// - `data`: A shared reference to the user data of the geometry, which is
-    ///  passed to the callback when invoked. The caller must ensure that the
-    /// geometry does not outlive the data.
+    ///   passed to the callback when invoked. The caller must ensure that the
+    ///   geometry does not outlive the data.
     pub fn set_occluded_function_borrowed<F, D>(&mut self, occluded: F, data: &'buf D)
     where
         D: UserData,
         F: for<'a> Fn(&mut OccludedFunctionNArgs<'a, D>) + Send + Sync + 'static,
     {
-        match self.shared.kind {
-            GeometryKind::USER => {
-                let ptr = data as *const D as *const ();
-                unsafe {
-                    rtcSetGeometryOccludedFunction(
-                        self.shared.handle,
-                        trampoline::occluded_function::<F, D>(),
-                    )
-                };
-                self.install_callback(CbKind::UserOccluded, ErasedFn::new(occluded), ptr, None);
-            }
-            // Occluded functions apply only to user geometry; ignored otherwise.
-            _ => {}
+        if self.shared.kind == GeometryKind::USER {
+            let ptr = data as *const D as *const ();
+            unsafe {
+                rtcSetGeometryOccludedFunction(
+                    self.shared.handle,
+                    trampoline::occluded_function::<F, D>(),
+                )
+            };
+            self.install_callback(CbKind::UserOccluded, ErasedFn::new(occluded), ptr, None);
         }
     }
 
     /// Unsets the callback to occlude user-defined geometry.
     pub fn unset_occluded_function(&mut self) {
-        match self.shared.kind {
-            GeometryKind::USER => unsafe {
+        if self.shared.kind == GeometryKind::USER {
+            unsafe {
                 rtcSetGeometryOccludedFunction(self.shared.handle, None);
                 self.clear_callback(CbKind::UserOccluded);
-            },
-            // Occluded functions apply only to user geometry; ignored otherwise.
-            _ => {}
+            }
         }
     }
 
@@ -1653,23 +1628,23 @@ impl<'buf> GeometryBuilder<'buf> {
     /// certain parts of the subdivision mesh:
     ///
     /// * [`RTCSubdivisionMode::NO_BOUNDARY`]: Boundary patches are ignored.
-    /// This way each rendered patch has a full set of control vertices.
+    ///   This way each rendered patch has a full set of control vertices.
     ///
     /// * [`RTCSubdivisionMode::SMOOTH_BOUNDARY`]: The sequence of boundary
-    /// control points are used to generate a smooth B-spline boundary curve
-    /// (default mode).
+    ///   control points are used to generate a smooth B-spline boundary curve
+    ///   (default mode).
     ///
     /// * [`RTCSubdivisionMode::PIN_CORNERS`]: Corner vertices are pinned to
-    /// their location during subdivision.
+    ///   their location during subdivision.
     ///
     /// * [`RTCSubdivisionMode::PIN_BOUNDARY`]: All vertices at the border are
-    /// pinned to their location during subdivision. This way the boundary is
-    /// interpolated linearly. This mode is typically used for texturing to also
-    /// map texels at the border of the texture to the mesh.
+    ///   pinned to their location during subdivision. This way the boundary is
+    ///   interpolated linearly. This mode is typically used for texturing to
+    ///   also map texels at the border of the texture to the mesh.
     ///
     /// * [`RTCSubdivisionMode::PIN_ALL`]: All vertices at the border are pinned
-    /// to their location during subdivision. This way all patches are linearly
-    /// interpolated.
+    ///   to their location during subdivision. This way all patches are
+    ///   linearly interpolated.
     pub fn set_subdivision_mode(&mut self, topology_id: u32, mode: SubdivisionMode) {
         match self.shared.kind {
             GeometryKind::SUBDIVISION => unsafe {
@@ -1744,16 +1719,11 @@ impl<'buf> GeometryBuilder<'buf> {
 
     /// Sets the number of primitives of a user-defined geometry.
     pub fn set_user_primitive_count(&mut self, count: u32) {
-        match self.shared.kind {
-            GeometryKind::USER => {
-                // Update the primitive count.
-                unsafe {
-                    rtcSetGeometryUserPrimitiveCount(self.shared.handle, count);
-                }
+        if self.shared.kind == GeometryKind::USER {
+            // Update the primitive count.
+            unsafe {
+                rtcSetGeometryUserPrimitiveCount(self.shared.handle, count);
             }
-            // Primitive count is meaningful only for user-defined geometry; a
-            // no-op for every other kind.
-            _ => {}
         }
     }
 
@@ -1830,24 +1800,19 @@ impl<'buf> GeometryBuilder<'buf> {
         D: UserData,
         F: for<'a> Fn(RTCGeometry, Vertices<'a>, u32, u32, Option<&D>) + Send + Sync + 'static,
     {
-        match self.shared.kind {
-            GeometryKind::SUBDIVISION => {
-                unsafe {
-                    rtcSetGeometryDisplacementFunction(
-                        self.shared.handle,
-                        trampoline::displacement_function::<F, D>(),
-                    )
-                }
-                self.install_callback(
-                    CbKind::Displacement,
-                    ErasedFn::new(displacement),
-                    std::ptr::null(),
-                    None,
-                );
+        if self.shared.kind == GeometryKind::SUBDIVISION {
+            unsafe {
+                rtcSetGeometryDisplacementFunction(
+                    self.shared.handle,
+                    trampoline::displacement_function::<F, D>(),
+                )
             }
-            // Displacement functions apply only to subdivision geometry; ignored
-            // otherwise.
-            _ => {}
+            self.install_callback(
+                CbKind::Displacement,
+                ErasedFn::new(displacement),
+                std::ptr::null(),
+                None,
+            );
         }
     }
 
@@ -1865,26 +1830,21 @@ impl<'buf> GeometryBuilder<'buf> {
         D: UserData,
         F: for<'a> Fn(RTCGeometry, Vertices<'a>, u32, u32, Option<&D>) + Send + Sync + 'static,
     {
-        match self.shared.kind {
-            GeometryKind::SUBDIVISION => {
-                let boxed = Box::new(data);
-                let ptr = &*boxed as *const D as *const ();
-                unsafe {
-                    rtcSetGeometryDisplacementFunction(
-                        self.shared.handle,
-                        trampoline::displacement_function::<F, D>(),
-                    )
-                }
-                self.install_callback(
-                    CbKind::Displacement,
-                    ErasedFn::new(displacement),
-                    ptr,
-                    Some(boxed),
-                );
+        if self.shared.kind == GeometryKind::SUBDIVISION {
+            let boxed = Box::new(data);
+            let ptr = &*boxed as *const D as *const ();
+            unsafe {
+                rtcSetGeometryDisplacementFunction(
+                    self.shared.handle,
+                    trampoline::displacement_function::<F, D>(),
+                )
             }
-            // Displacement functions apply only to subdivision geometry; ignored
-            // otherwise.
-            _ => {}
+            self.install_callback(
+                CbKind::Displacement,
+                ErasedFn::new(displacement),
+                ptr,
+                Some(boxed),
+            );
         }
     }
 
@@ -1905,20 +1865,15 @@ impl<'buf> GeometryBuilder<'buf> {
         D: UserData,
         F: for<'a> Fn(RTCGeometry, Vertices<'a>, u32, u32, Option<&D>) + Send + Sync + 'static,
     {
-        match self.shared.kind {
-            GeometryKind::SUBDIVISION => {
-                let ptr = data as *const D as *const ();
-                unsafe {
-                    rtcSetGeometryDisplacementFunction(
-                        self.shared.handle,
-                        trampoline::displacement_function::<F, D>(),
-                    )
-                }
-                self.install_callback(CbKind::Displacement, ErasedFn::new(displacement), ptr, None);
+        if self.shared.kind == GeometryKind::SUBDIVISION {
+            let ptr = data as *const D as *const ();
+            unsafe {
+                rtcSetGeometryDisplacementFunction(
+                    self.shared.handle,
+                    trampoline::displacement_function::<F, D>(),
+                )
             }
-            // Displacement functions apply only to subdivision geometry; ignored
-            // otherwise.
-            _ => {}
+            self.install_callback(CbKind::Displacement, ErasedFn::new(displacement), ptr, None);
         }
     }
 
@@ -2126,8 +2081,23 @@ impl<'buf> Geometry<'buf> {
     /// let device = Device::new().unwrap();
     /// let builder = device.create_geometry(GeometryKind::TRIANGLE).unwrap();
     /// ```
+    #[allow(clippy::new_ret_no_self)]
     pub fn new<'dev>(device: &'dev Device, kind: GeometryKind) -> GeometryBuilder<'buf> {
         let handle = unsafe { rtcNewGeometry(device.handle, kind) };
+        // `GeometryShared` is `Sync` but deliberately NOT `Send` (only `Sync` is
+        // `unsafe impl`'d), so `Arc<GeometryShared>` is auto-`!Send`/`!Sync` and
+        // clippy's `arc_with_non_send_sync` fires. This is intended, not a bug:
+        // - The `Arc` is required (NOT `Rc`): `Geometry` is `Send + Sync` and its
+        //   clones may be dropped on a different thread, so the strong-count must be
+        //   atomic. Thread-safety is asserted at the `Geometry` wrapper (`unsafe impl
+        //   Send + Sync`) plus `unsafe impl Sync for GeometryShared`.
+        // - Do NOT silence this by making `GeometryShared: Send`. That `!Send` is
+        //   load-bearing: it is the only thing keeping `Arc<GeometryShared>` `!Sync`,
+        //   which is the only thing keeping `GeometryBuilder` `!Sync` (SB-11 -- a
+        //   builder must not be shared across threads while it mutates its
+        //   `UnsafeCell`s through `&mut`). Adding `Send` here makes the builder
+        //   auto-`Send + Sync` and breaks that guarantee.
+        #[allow(clippy::arc_with_non_send_sync)]
         let shared = Arc::new(GeometryShared {
             device: device.clone(),
             handle,

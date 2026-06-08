@@ -30,7 +30,7 @@ impl RayNp {
         unsafe {
             let aligned_field_size = (n * std::mem::size_of::<f32>() + 15) & !15;
             let layout = alloc::Layout::from_size_align(aligned_field_size * 12, 16).unwrap();
-            let ptr = match NonNull::new(alloc::alloc_zeroed(layout) as *mut u8) {
+            let ptr = match NonNull::new(alloc::alloc_zeroed(layout)) {
                 Some(ptr) => ptr,
                 None => alloc::handle_alloc_error(layout),
             };
@@ -90,7 +90,7 @@ impl Drop for RayNp {
     fn drop(&mut self) {
         unsafe {
             let layout = alloc::Layout::from_size_align(self.aligned_field_size * 12, 16).unwrap();
-            alloc::dealloc(self.ptr.as_ptr() as *mut u8, layout);
+            alloc::dealloc(self.ptr.as_ptr(), layout);
         }
     }
 }
@@ -257,12 +257,12 @@ impl HitNp {
         unsafe {
             let aligned_field_size = (std::mem::size_of::<f32>() * n + 15) & !15;
             let layout = alloc::Layout::from_size_align(aligned_field_size * 8, 16).unwrap();
-            let ptr = match NonNull::new(alloc::alloc_zeroed(layout) as *mut u8) {
+            let ptr = match NonNull::new(alloc::alloc_zeroed(layout)) {
                 Some(ptr) => ptr,
                 None => alloc::handle_alloc_error(layout),
             };
             // Set the primID, geomID, instID to INVALID_ID.
-            (ptr.as_ptr() as *mut u8)
+            ptr.as_ptr()
                 .add(5 * aligned_field_size)
                 .write_bytes(0xFF, aligned_field_size * 3);
             HitNp {
@@ -318,7 +318,7 @@ impl Drop for HitNp {
     fn drop(&mut self) {
         unsafe {
             let layout = alloc::Layout::from_size_align(self.aligned_field_size * 8, 16).unwrap();
-            alloc::dealloc(self.ptr.as_ptr() as *mut u8, layout);
+            alloc::dealloc(self.ptr.as_ptr(), layout);
         }
     }
 }

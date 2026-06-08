@@ -399,7 +399,7 @@ impl<T> DerefMut for AlignedVector<T> {
 impl<T> Drop for AlignedVector<T> {
     fn drop(&mut self) {
         unsafe {
-            let mut vec = mem::replace(&mut self.vec, Vec::new());
+            let mut vec = mem::take(&mut self.vec);
             let raw = vec.as_mut_ptr() as *mut u8;
             alloc::dealloc(raw, self.layout);
             mem::forget(vec);

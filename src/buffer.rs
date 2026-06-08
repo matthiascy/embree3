@@ -361,11 +361,11 @@ impl<'a, T: 'a> BufferMappedRange<'a, T> {
         size: usize,
     ) -> Result<BufferMappedRange<'a, T>, Error> {
         debug_assert!(
-            size % mem::size_of::<T>() == 0,
+            size.is_multiple_of(mem::size_of::<T>()),
             "Size of the range of the mapped buffer must be multiple of T!"
         );
         debug_assert!(
-            offset % mem::size_of::<T>() == 0,
+            offset.is_multiple_of(mem::size_of::<T>()),
             "Offset must be multiple of T!"
         );
         let ptr = unsafe {

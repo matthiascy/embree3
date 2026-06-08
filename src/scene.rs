@@ -594,8 +594,7 @@ impl<'a> Scene<'a> {
     /// # Arguments
     ///
     /// * `progress` - A callback function that takes a number in range [0.0,
-    ///   1.0]
-    /// indicating the progress of the operation.
+    ///   1.0] indicating the progress of the operation.
     ///
     /// # Warning
     ///
@@ -1019,12 +1018,12 @@ impl<'a> Scene<'a> {
     /// # Arguments
     ///
     /// * `ctx` - The intersection context to use for the ray query. It
-    ///   specifies flags
-    /// to optimize traversal and a filter callback function to be invoked for
-    /// every intersection. Further, the pointer to the intersection context
-    /// is propagated to callback functions invoked during traversal and can
-    /// thus be used to extend the ray with additional data. See
-    /// [`IntersectContext`](crate::IntersectContext) for more information.
+    ///   specifies flags to optimize traversal and a filter callback function
+    ///   to be invoked for every intersection. Further, the pointer to the
+    ///   intersection context is propagated to callback functions invoked
+    ///   during traversal and can thus be used to extend the ray with
+    ///   additional data. See [`IntersectContext`](crate::IntersectContext) for
+    ///   more information.
     ///
     /// * `rays` - The ray stream to intersect with the scene.
     pub fn occluded_stream_aos<P: RayPacket, C: AsIntersectContext>(
