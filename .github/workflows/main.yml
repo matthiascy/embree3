@@ -26,13 +26,6 @@ jobs:
           cargo miri setup
       - name: Test with Miri (pure-Rust tests only; FFI tests cannot run under Miri)
         run: cargo miri test --lib
-  # Advisory, not a gate: embree's parallel build/commit runs on an uninstrumented
-  # oneTBB pool, so TSAN reports false positives there, and the broad
-  # `called_from_lib` suppressions that quiet them can also mask a real race that
-  # surfaces only on an embree-rooted stack. TSAN still catches races wholly
-  # within this crate's instrumented code. `continue-on-error` keeps it
-  # non-blocking by design; promote to a gate only with narrower, CI-derived
-  # suppressions.
   thread_sanitizer:
     name: thread_sanitizer (advisory)
     runs-on: ubuntu-latest
@@ -49,26 +42,11 @@ jobs:
       - name: FFI concurrency tests under ThreadSanitizer
         env:
           RUSTFLAGS: "-Zsanitizer=thread"
-          # Only this crate's code (and std, via -Zbuild-std) is instrumented;
-          # embree, oneTBB, libstdc++ and libc are not. `ignore_noninstrumented_modules=1`
-          # makes TSAN report a race only when at least one side is in instrumented
-          # code -- exactly what we want to verify. It drops embree/TBB's internal
-          # init and process-teardown false positives (e.g. a TBB worker's
-          # `operator new` racing the main thread's `__cxa_finalize` free at exit,
-          # whose racy frames are in libc/libstdc++ and so escaped the
-          # `called_from_lib` suppressions). A genuine race in this crate's
-          # callback/closure handling is instrumented on both sides and is still
-          # reported. The suppressions file is kept as defense-in-depth.
           TSAN_OPTIONS: "suppressions=${{ github.workspace }}/tsan-suppressions.txt ignore_noninstrumented_modules=1"
         run: >
           cargo test -Zbuild-std --target x86_64-unknown-linux-gnu
           --test callback_concurrency --test concurrent_bounds --test bvh_builder --test collide
           --test arc_scene_concurrent
-  # Hard gate: ASan instruments this crate's code, so a use-after-free / OOB in
-  # our FFI usage fails the build regardless of embree being uninstrumented. (LSan
-  # leak reports rooted in embree/oneTBB are suppressed -- see lsan-suppressions.txt;
-  # those patterns are necessarily broad, so a leak whose allocation routes through
-  # an embree callback could be hidden until they are narrowed from real CI reports.)
   address_sanitizer:
     runs-on: ubuntu-latest
     steps:
@@ -83,14 +61,6 @@ jobs:
       - name: FFI ownership/lifetime + lane gather/scatter tests under AddressSanitizer + LeakSanitizer
         env:
           RUSTFLAGS: "-Zsanitizer=address"
-          # ASan includes LeakSanitizer; embree (and oneTBB, if linked) keep
-          # at-exit allocations LSan would report. Suppress leaks rooted in those
-          # uninstrumented native libs so only this crate's leaks surface (see the
-          # file). `--lib` runs the in-crate unit tests (incl. the unchecked
-          # gather/scatter column-offset guards); `--test lane_iter` drives the
-          # optimized `for_each_active_lane` FFI gather/scatter path; the others
-          # exercise the heap-owned callback closures + per-callback user data
-          # (drop-once / replacement / borrow).
           LSAN_OPTIONS: "suppressions=${{ github.workspace }}/lsan-suppressions.txt"
         run: >
           cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --lib
@@ -105,22 +75,11 @@ jobs:
       - run: wget https://github.com/embree/embree/releases/download/v${EMBREE_VERSION}/embree-${EMBREE_VERSION}.x86_64.linux.tar.gz
       - run: tar -xf embree-${EMBREE_VERSION}.x86_64.linux.tar.gz
       - run: echo "EMBREE_DIR=`pwd`/embree-${EMBREE_VERSION}.x86_64.linux/" >> $GITHUB_ENV
-      # `source embree-vars.sh` would only set LD_LIBRARY_PATH for that one step's
-      # shell; persist it via $GITHUB_ENV so the test binaries can load
-      # libembree3.so.3 at runtime in the `cargo test` step.
       - run: echo "LD_LIBRARY_PATH=`pwd`/embree-${EMBREE_VERSION}.x86_64.linux/lib" >> $GITHUB_ENV
       - run: cargo build
       - run: cargo test
       - run: cargo doc
       - run: scripts/build-examples-linux-mac.sh
-  # Compile-fail (trybuild) guards run only here, on a PINNED toolchain. trybuild
-  # exact-matches normalized compiler output, which drifts across rustc versions,
-  # so the snapshots in tests/compile_fail/*.stderr are tied to this exact
-  # toolchain -- a pinned stable version, so the pin only moves on an intentional
-  # bump (not every six weeks like a floating `stable`). The default `cargo test`
-  # jobs skip these (the test is a no-op unless RUN_UI_TESTS is set). When bumping
-  # `toolchain` below, regenerate the snapshots on the same version (see
-  # tests/compile_fail.rs).
   compile_fail:
     runs-on: ubuntu-latest
     steps:
@@ -137,12 +96,7 @@ jobs:
           RUN_UI_TESTS: "1"
         run: cargo test --test compile_fail
   build_mac:
-    # Embree 3.13.5 ships only an x86_64 macOS binary, but `macos-latest` is now
-    # arm64 (Apple Silicon) -- linking the x86_64 dylib into an arm64 build fails
-    # ("found architecture 'x86_64', required architecture 'arm64'"). Pin to the
-    # Intel runner so the architectures match. (Embree 3.x has no native arm64
-    # mac binary; arm64 CI would need an Embree 4.x or a from-source build.)
-    runs-on: macos-13
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
