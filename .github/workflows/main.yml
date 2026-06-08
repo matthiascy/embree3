@@ -94,6 +94,7 @@ jobs:
           cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --lib
           --test callback_binding --test user_geometry_filter --test filter_closure_lifetime
           --test collide --test context_ext_recovery --test point_query_packet --test lane_iter
+          --test filter_unchecked_accessors
   build_linux:
     runs-on: ubuntu-latest
     steps:
@@ -109,6 +110,30 @@ jobs:
       - run: cargo test
       - run: cargo doc
       - run: scripts/build-examples-linux-mac.sh
+  # Compile-fail (trybuild) guards run only here, on a PINNED toolchain. trybuild
+  # exact-matches normalized compiler output, which drifts across rustc versions,
+  # so the snapshots in tests/compile_fail/*.stderr are tied to this exact
+  # toolchain -- a pinned stable version, so the pin only moves on an intentional
+  # bump (not every six weeks like a floating `stable`). The default `cargo test`
+  # jobs skip these (the test is a no-op unless RUN_UI_TESTS is set). When bumping
+  # `toolchain` below, regenerate the snapshots on the same version (see
+  # tests/compile_fail.rs).
+  compile_fail:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: 1.96.0
+          override: true
+      - run: wget https://github.com/embree/embree/releases/download/v${EMBREE_VERSION}/embree-${EMBREE_VERSION}.x86_64.linux.tar.gz
+      - run: tar -xf embree-${EMBREE_VERSION}.x86_64.linux.tar.gz
+      - run: echo "EMBREE_DIR=`pwd`/embree-${EMBREE_VERSION}.x86_64.linux/" >> $GITHUB_ENV
+      - run: echo "LD_LIBRARY_PATH=`pwd`/embree-${EMBREE_VERSION}.x86_64.linux/lib" >> $GITHUB_ENV
+      - name: Compile-fail soundness guards (trybuild)
+        env:
+          RUN_UI_TESTS: "1"
+        run: cargo test --test compile_fail
   build_mac:
     runs-on: macos-latest
     steps:
