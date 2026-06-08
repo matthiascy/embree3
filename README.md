@@ -11,7 +11,26 @@ ray-tracing kernels. Targets **Embree 3.13.5**.
 
 [![CI](https://github.com/matthiascy/embree3/actions/workflows/main.yml/badge.svg)](https://github.com/matthiascy/embree3/actions/workflows/main.yml)
 
-Still in development; some features are in progress.
+First public release. The core Embree 3 API is wrapped behind a safe, tested
+interface and is usable today. It is pre-1.0, so the API may still change between
+minor releases, and some Embree functions are not yet wrapped.
+
+## Features
+
+- **Safe, capturing callbacks**: user-geometry intersect/occluded, filter,
+  bounds, displacement, and progress callbacks take ordinary Rust closures,
+  bridged to Embree with no leaks or use-after-free.
+- **Single, packet, and stream ray queries**: `intersect`/`occluded`, the
+  `{4,8,16}`-wide packet variants with a typed, 16-byte-aligned `ValidMaskN`, and
+  the stream APIs; per-ray context extensions are recoverable inside callbacks.
+- **User geometry** with ergonomic lane iteration (`for_each_active_lane`) and an
+  unchecked fast path for hot filter loops.
+- **Standalone BVH builder** (`Device::create_bvh`, `Bvh::build_scoped`):
+  bring-your-own node layout over `rtcBuildBVH`, with handles confined to the
+  build scope.
+- **Scene-vs-scene collision** (`Scene::collide`) for broad-phase candidate pairs.
+- **Typed, zero-copy buffers** across Embree-managed, geometry-local, and shared
+  host memory.
 
 ## Building
 
