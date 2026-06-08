@@ -143,7 +143,7 @@ fn main() {
     };
 
     let mut state = State {
-        scene: scene.clone(),
+        scene,
         user: user_state,
     };
 

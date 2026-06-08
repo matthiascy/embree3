@@ -11,7 +11,8 @@
 
 use embree3::{
     AlignedArray, BufferUsage, BuildQuality, Device, Format, Geometry, GeometryKind, HitN,
-    IntersectContextExt, Ray, RayHit, RayN, Scene, SoAHit, SoARay, ValidityN, INVALID_ID,
+    IntersectContext, IntersectContextExt, Ray, RayHit, RayN, Scene, SoAHit, SoARay, ValidityN,
+    INVALID_ID,
 };
 use glam::{vec3, Mat4, Vec3, Vec4};
 use support::{
@@ -346,7 +347,7 @@ fn intersect_filter<'a>(
     rays: RayN<'a>,
     _hits: HitN<'a>,
     mut valid: ValidityN<'a>,
-    ctx: &mut IntersectContext2,
+    ctx: &mut IntersectContext,
     _user_data: Option<&()>,
 ) {
     assert_eq!(rays.len(), 1);
@@ -363,20 +364,25 @@ fn intersect_filter<'a>(
     if t >= 1.0 {
         valid[0] = 0;
     } else {
-        // otherwise accept hit and remember transparency
-        ctx.ext.transparency = t;
+        // otherwise accept hit and remember transparency. SAFETY: the queries in
+        // this example always pass an `IntersectContextExt<RayExtra>`.
+        let ext = unsafe { ctx.ext_mut::<RayExtra>() };
+        ext.transparency = t;
     }
 }
 
-fn intersect_filter_n<'a, 'b>(
+fn intersect_filter_n<'a>(
     rays: RayN<'a>,
     _hits: HitN<'a>,
     mut valid: ValidityN<'a>,
-    ctx: &'b mut IntersectContext2Stream,
+    ctx: &mut IntersectContext,
     _user_data: Option<&()>,
 ) {
     assert_eq!(rays.len(), valid.len());
     let n = rays.len();
+    // SAFETY: the stream queries in this example always pass an
+    // `IntersectContextExt<Vec<RayExtra>>`.
+    let ext = unsafe { ctx.ext_mut::<Vec<RayExtra>>() };
     // iterate over all rays in ray packet
     for i in 0..n {
         // calculate loop and execution mask
@@ -397,7 +403,7 @@ fn intersect_filter_n<'a, 'b>(
             valid[vi] = 0;
         } else {
             // otherwise accept hit and remember transparency
-            ctx.ext[rays.id(i) as usize].transparency = t;
+            ext[rays.id(i) as usize].transparency = t;
         }
     }
 }
@@ -406,7 +412,7 @@ fn occluded_filter<'a>(
     rays: RayN<'a>,
     hits: HitN<'a>,
     mut valid: ValidityN<'a>,
-    context: &mut IntersectContext2,
+    context: &mut IntersectContext,
     _user_data: Option<&()>,
 ) {
     assert_eq!(rays.len(), 1);
@@ -415,28 +421,30 @@ fn occluded_filter<'a>(
         return;
     }
 
-    for i in context.ext.first_hit..context.ext.last_hit {
+    // SAFETY: the queries in this example always pass an
+    // `IntersectContextExt<RayExtra>`.
+    let ext = unsafe { context.ext_mut::<RayExtra>() };
+
+    for i in ext.first_hit..ext.last_hit {
         let slot = i as usize % HIT_LIST_LEN;
-        if context.ext.hit_geom_ids[slot] == hits.geom_id(0)
-            && context.ext.hit_prim_ids[slot] == hits.prim_id(0)
-        {
+        if ext.hit_geom_ids[slot] == hits.geom_id(0) && ext.hit_prim_ids[slot] == hits.prim_id(0) {
             valid[0] = 0; // ignore duplicate intersections
             return;
         }
     }
 
     // store hit in hit list
-    let slot = context.ext.last_hit % HIT_LIST_LEN as u32;
-    context.ext.hit_geom_ids[slot as usize] = hits.geom_id(0);
-    context.ext.hit_prim_ids[slot as usize] = hits.prim_id(0);
-    context.ext.last_hit += 1;
+    let slot = ext.last_hit % HIT_LIST_LEN as u32;
+    ext.hit_geom_ids[slot as usize] = hits.geom_id(0);
+    ext.hit_prim_ids[slot as usize] = hits.prim_id(0);
+    ext.last_hit += 1;
 
-    if context.ext.last_hit - context.ext.first_hit > HIT_LIST_LEN as u32 {
-        context.ext.first_hit += 1;
+    if ext.last_hit - ext.first_hit > HIT_LIST_LEN as u32 {
+        ext.first_hit += 1;
     }
 
     let t = transparency_function(rays.hit_point(0));
-    context.ext.transparency *= t;
+    ext.transparency *= t;
     if t != 0.0 {
         valid[0] = 0;
     }
@@ -446,11 +454,14 @@ fn occluded_filter_n<'a>(
     rays: RayN<'a>,
     hits: HitN<'a>,
     mut valid: ValidityN<'a>,
-    ctx: &mut IntersectContext2Stream,
+    ctx: &mut IntersectContext,
     _user_data: Option<&()>,
 ) {
     assert_eq!(rays.len(), valid.len());
     let n = rays.len();
+    // SAFETY: the stream queries in this example always pass an
+    // `IntersectContextExt<Vec<RayExtra>>`.
+    let ext = unsafe { ctx.ext_mut::<Vec<RayExtra>>() };
 
     // iterate over all rays in ray packet
     for i in 0..n {
@@ -471,12 +482,12 @@ fn occluded_filter_n<'a>(
         // the occlusion filter may be called multiple times with the same hit,
         // we remember the last N hits, and skip duplicates
         let rid = rays.id(i) as usize;
-        let first_hit = ctx.ext[rid].first_hit;
-        let mut last_hit = ctx.ext[rid].last_hit;
+        let first_hit = ext[rid].first_hit;
+        let mut last_hit = ext[rid].last_hit;
         for j in first_hit..last_hit {
             let slot = j as usize % HIT_LIST_LEN;
-            let last_geom_id = ctx.ext[rid].hit_geom_ids[slot];
-            let last_prim_id = ctx.ext[rid].hit_prim_ids[slot];
+            let last_geom_id = ext[rid].hit_geom_ids[slot];
+            let last_prim_id = ext[rid].hit_prim_ids[slot];
             if last_geom_id == hit_geom_id && last_prim_id == hit_prim_id {
                 valid[vi] = 0; // ignore duplicate intersections
                 break;
@@ -488,17 +499,17 @@ fn occluded_filter_n<'a>(
 
         // store hit in hit list
         let slot = last_hit % HIT_LIST_LEN as u32;
-        ctx.ext[rid].hit_geom_ids[slot as usize] = hit_geom_id;
-        ctx.ext[rid].hit_prim_ids[slot as usize] = hit_prim_id;
+        ext[rid].hit_geom_ids[slot as usize] = hit_geom_id;
+        ext[rid].hit_prim_ids[slot as usize] = hit_prim_id;
         last_hit += 1;
-        ctx.ext[rid].last_hit = last_hit;
+        ext[rid].last_hit = last_hit;
         if last_hit - first_hit >= HIT_LIST_LEN as u32 {
-            ctx.ext[rid].first_hit = first_hit + 1;
+            ext[rid].first_hit = first_hit + 1;
         }
 
         // calculate transparency
-        let t = transparency_function(rays.hit_point(i)) * ctx.ext[rid].transparency;
-        ctx.ext[rid].transparency = t;
+        let t = transparency_function(rays.hit_point(i)) * ext[rid].transparency;
+        ext[rid].transparency = t;
 
         // reject a hit if not fully opaque
         if t != 0.0 {
@@ -586,17 +597,14 @@ fn main() {
         "Intersection Filter",
     );
 
-    let state = DebugState {
-        scene: scene.clone(),
-        user: (),
-    };
+    let state = DebugState { scene, user: () };
 
     support::display::run(
         display,
         state,
         |_, _| {},
-        move |image, camera, _, _| {
-            render_frame(image, &camera, &scene);
+        move |image, camera, _, state| {
+            render_frame(image, &camera, &state.scene);
         },
         |_| {},
     );

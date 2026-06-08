@@ -10,7 +10,7 @@ pub use egui;
 
 use embree3::Scene;
 pub use image::{Rgba, RgbaImage};
-pub use rayon::{iter::*, prelude::*, slice::*, vec::*};
+pub use rayon::{iter::*, prelude::*};
 
 pub mod math {
     pub use cgmath::*;
@@ -328,7 +328,9 @@ pub fn clamp<T: PartialOrd>(x: T, min: T, max: T) -> T {
     }
 }
 
-#[derive(Clone, Debug)]
+// Not `Clone`: `Scene` is a unique handle owner (no longer `Clone`); share a
+// committed scene via `Arc<Scene>` instead of cloning the state.
+#[derive(Debug)]
 pub struct DebugState<T: Sized> {
     pub scene: Scene<'static>,
     pub user: T,

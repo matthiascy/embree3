@@ -153,17 +153,14 @@ fn main() {
         "Dynamic Scene",
     );
 
-    let state = DebugState {
-        scene: scene.clone(),
-        user: (),
-    };
+    let state = DebugState { scene, user: () };
 
     support::display::run(
         display,
         state,
         move |_, _| {},
-        move |image, camera, time, _| {
-            render_frame(image, camera, &scene, cube_id, ground_id);
+        move |image, camera, time, state| {
+            render_frame(image, camera, &state.scene, cube_id, ground_id);
         },
         |_| {},
     );

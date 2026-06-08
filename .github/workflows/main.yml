@@ -28,7 +28,15 @@ jobs:
           cargo miri setup
       - name: Test with Miri (pure-Rust tests only; FFI tests cannot run under Miri)
         run: cargo miri test --lib
+  # Advisory, not a gate: embree's parallel build/commit runs on an uninstrumented
+  # oneTBB pool, so TSAN reports false positives there, and the broad
+  # `called_from_lib` suppressions that quiet them can also mask a real race that
+  # surfaces only on an embree-rooted stack. TSAN still catches races wholly
+  # within this crate's instrumented code. `continue-on-error` keeps it
+  # non-blocking by design; promote to a gate only with narrower, CI-derived
+  # suppressions.
   thread_sanitizer:
+    name: thread_sanitizer (advisory)
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
@@ -50,7 +58,41 @@ jobs:
           TSAN_OPTIONS: "suppressions=${{ github.workspace }}/tsan-suppressions.txt"
         run: >
           cargo test -Zbuild-std --target x86_64-unknown-linux-gnu
-          --test callback_concurrency --test concurrent_bounds --test bvh_builder
+          --test callback_concurrency --test concurrent_bounds --test bvh_builder --test collide
+  # Hard gate: ASan instruments this crate's code, so a use-after-free / OOB in
+  # our FFI usage fails the build regardless of embree being uninstrumented. (LSan
+  # leak reports rooted in embree/oneTBB are suppressed -- see lsan-suppressions.txt;
+  # those patterns are necessarily broad, so a leak whose allocation routes through
+  # an embree callback could be hidden until they are narrowed from real CI reports.)
+  address_sanitizer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
+          components: rust-src
+      - run: wget https://github.com/embree/embree/releases/download/v${EMBREE_VERSION}/embree-${EMBREE_VERSION}.x86_64.linux.tar.gz
+      - run: tar -xf embree-${EMBREE_VERSION}.x86_64.linux.tar.gz
+      - run: echo "EMBREE_DIR=`pwd`/embree-${EMBREE_VERSION}.x86_64.linux/" >> $GITHUB_ENV
+      - run: echo "LD_LIBRARY_PATH=`pwd`/embree-${EMBREE_VERSION}.x86_64.linux/lib" >> $GITHUB_ENV
+      - name: FFI ownership/lifetime + lane gather/scatter tests under AddressSanitizer + LeakSanitizer
+        env:
+          RUSTFLAGS: "-Zsanitizer=address"
+          # ASan includes LeakSanitizer; embree (and oneTBB, if linked) keep
+          # at-exit allocations LSan would report. Suppress leaks rooted in those
+          # uninstrumented native libs so only this crate's leaks surface (see the
+          # file). `--lib` runs the in-crate unit tests (incl. the unchecked
+          # gather/scatter column-offset guards); `--test lane_iter` drives the
+          # optimized `for_each_active_lane` FFI gather/scatter path; the others
+          # exercise the heap-owned callback closures + per-callback user data
+          # (drop-once / replacement / borrow).
+          LSAN_OPTIONS: "suppressions=${{ github.workspace }}/lsan-suppressions.txt"
+        run: >
+          cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --lib
+          --test callback_binding --test user_geometry_filter --test filter_closure_lifetime
+          --test collide --test context_ext_recovery --test point_query_packet --test lane_iter
   build_linux:
     runs-on: ubuntu-latest
     steps:

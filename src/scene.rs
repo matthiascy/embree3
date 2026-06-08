@@ -1,13 +1,10 @@
 use crate::{
-    callback::ErasedFn, AsIntersectContext, Bounds, BufferData, BufferUsage, BuildQuality, Error,
-    Format, LinearBounds, PointQuery, PointQuery16, PointQuery4, PointQuery8, PointQueryContext,
-    Ray, Ray16, Ray8, RayHit, RayHit16, RayHit8, RayHitNp, RayHitPacket, RayPacket, SceneFlags,
+    callback::ErasedFn, AsIntersectContext, Bounds, BufferData, BufferUsage, BuildQuality,
+    Collision, Error, Format, LinearBounds, PointQuery, PointQuery16, PointQuery4, PointQuery8,
+    PointQueryContext, Ray, Ray16, Ray8, RayHit, RayHit16, RayHit8, RayHitNp, RayHitPacket,
+    RayPacket, SceneFlags, ValidMask,
 };
-use std::{
-    collections::HashMap,
-    mem,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, mem};
 
 use crate::{
     device::Device,
@@ -17,24 +14,32 @@ use crate::{
 };
 
 /// A scene containing various geometries.
+///
+/// `Scene` is a **unique owner** of its `RTCScene` handle: it is deliberately
+/// **not `Clone`** (the previous `rtcRetainScene`-based `Clone` let several
+/// handles alias one native scene, which made `&mut Scene` non-exclusive and
+/// opened a use-after-free between a clone replacing the progress callback and
+/// another clone's `commit` invoking it). To share a committed scene across
+/// threads for concurrent queries, wrap it in `Arc<Scene>` -- `Scene` is
+/// `Send + Sync`, and read-only queries take `&self`. Mutation
+/// (`set_progress_monitor_function`, per-frame edits) takes `&mut self`, so the
+/// borrow checker now forbids replacing state while a query/commit is running.
 #[derive(Debug)]
 pub struct Scene<'a> {
     pub(crate) handle: RTCScene,
     pub(crate) device: Device,
-    progress_monitor_fn: Arc<Mutex<Option<ErasedFn>>>,
-    geometries: Arc<Mutex<HashMap<u32, Geometry<'a>>>>,
-}
-
-impl<'a> Clone for Scene<'a> {
-    fn clone(&self) -> Self {
-        unsafe { rtcRetainScene(self.handle) }
-        Self {
-            handle: self.handle,
-            device: self.device.clone(),
-            geometries: self.geometries.clone(),
-            progress_monitor_fn: self.progress_monitor_fn.clone(),
-        }
-    }
+    // Plain owned slot (not `Arc<Mutex<_>>`): `Scene` is not `Clone`, so this is
+    // never shared, and `set`/`unset` take `&mut self`. embree holds the boxed
+    // closure's stable address until it is replaced or the scene drops; exclusive
+    // `&mut` access means no `commit` can be reading it concurrently.
+    progress_monitor_fn: Option<ErasedFn>,
+    // Plain `HashMap` (no `Arc`, no `Mutex`): `Scene` is not `Clone`, so this map
+    // is never shared between handles, and every mutator (`attach_geometry`/
+    // `detach_geometry`/...) takes `&mut self` while every reader
+    // (`get_geometry`/...) takes `&self` -- the borrow checker already serializes
+    // them, so no lock is needed. (Concurrent readers via `Arc<Scene>` are plain
+    // shared `&` map reads, with no writer possible.)
+    geometries: HashMap<u32, Geometry<'a>>,
 }
 
 impl<'a> Drop for Scene<'a> {
@@ -55,6 +60,39 @@ impl<'a> Drop for Scene<'a> {
 unsafe impl<'a> Sync for Scene<'a> {}
 unsafe impl<'a> Send for Scene<'a> {}
 
+/// A per-lane validity mask for the packet query methods (`intersect{4,8,16}`,
+/// `occluded{4,8,16}`, `point_query{4,8,16}`): each lane is
+/// [`ValidMask::Valid`] (`-1`) or [`ValidMask::Invalid`] (`0`). `N` is the
+/// packet width.
+///
+/// It is `#[repr(C, align(16))]` because embree reads the mask with aligned
+/// SIMD loads and (in debug builds) rejects a mask that is not 16-byte aligned
+/// -- a plain `[i32; N]` is only 4-byte aligned. Using the [`ValidMask`] enum
+/// as the element keeps every lane to embree's required `-1`/`0`. Because the
+/// alignment is structural, the mask is handed to embree by pointer with **no
+/// copy and no runtime check**.
+#[repr(C, align(16))]
+pub struct ValidMaskN<const N: usize>([ValidMask; N]);
+
+impl<const N: usize> ValidMaskN<N> {
+    /// A mask with every lane [`ValidMask::Valid`].
+    pub const fn all_active() -> Self { Self([ValidMask::Valid; N]) }
+
+    /// A mask from explicit per-lane values.
+    pub const fn new(lanes: [ValidMask; N]) -> Self { Self(lanes) }
+
+    /// The per-lane values, mutably (e.g. to disable a lane).
+    pub fn lanes_mut(&mut self) -> &mut [ValidMask; N] { &mut self.0 }
+
+    /// Raw `const int*` for the FFI call ([`ValidMask`] is `#[repr(i32)]`, so
+    /// `[ValidMask; N]` is layout-compatible with `[i32; N]`).
+    fn as_ptr(&self) -> *const i32 { self.0.as_ptr().cast() }
+}
+
+impl<const N: usize> From<[ValidMask; N]> for ValidMaskN<N> {
+    fn from(lanes: [ValidMask; N]) -> Self { Self(lanes) }
+}
+
 /// Emits a `point_query{4,8,16}` method. Each lane is an independent query with
 /// its own accumulator in `per_lane`; the closure is shared but routed per-lane
 /// through the `userPtr` array. See [`Scene::point_query`] for the single-query
@@ -64,7 +102,7 @@ macro_rules! impl_point_query_packet {
         $(#[$doc])*
         pub fn $name<F, D>(
             &self,
-            valid: &[i32; $n],
+            valid: &ValidMaskN<$n>,
             queries: &mut $query,
             context: &mut PointQueryContext,
             mut query_fn: F,
@@ -109,14 +147,14 @@ impl<'a> Scene<'a> {
                 handle,
                 device,
                 geometries: Default::default(),
-                progress_monitor_fn: Arc::new(Mutex::new(None)),
+                progress_monitor_fn: None,
             })
         }
     }
 
     /// Creates a new scene with the given device and flags.
     pub(crate) fn new_with_flags(device: Device, flags: SceneFlags) -> Result<Self, Error> {
-        let scene = Self::new(device)?;
+        let mut scene = Self::new(device)?;
         scene.set_flags(flags);
         Ok(scene)
     }
@@ -130,8 +168,9 @@ impl<'a> Scene<'a> {
     /// unique per scene, and is used to identify the geometry when hitting
     /// by a ray or ray packet during ray queries.
     ///
-    /// This function is thread-safe, thus multiple threads can attach
-    /// geometries to a scene at the same time.
+    /// Takes `&mut self`: attaching is exclusive, so it cannot run while a
+    /// query, commit, or another attach/detach is in progress on this
+    /// scene.
     ///
     /// The geometry IDs are assigned sequentially, starting at 0, as long as
     /// no geometries are detached from the scene. If geometries are detached
@@ -142,7 +181,7 @@ impl<'a> Scene<'a> {
         // Retain a wrapper clone so the geometry's `Arc` strong-count is >= 2 while
         // attached. That is what makes `Geometry::try_edit` fail (mutation
         // impossible) until the geometry is detached from every scene.
-        self.geometries.lock().unwrap().insert(id, geometry.clone());
+        self.geometries.insert(id, geometry.clone());
         id
     }
 
@@ -156,22 +195,24 @@ impl<'a> Scene<'a> {
     /// IDs for small scenes would thus cause a memory consumption and
     /// performance overhead.
     ///
-    /// This function is thread-safe, thus multiple threads can attach
-    /// geometries to a scene at the same time.
+    /// Takes `&mut self`: attaching is exclusive, so it cannot run while a
+    /// query, commit, or another attach/detach is in progress on this
+    /// scene.
     pub fn attach_geometry_by_id(&mut self, geometry: &Geometry<'a>, id: u32) {
         unsafe { rtcAttachGeometryByID(self.handle, geometry.shared.handle, id) };
-        self.geometries.lock().unwrap().insert(id, geometry.clone());
+        self.geometries.insert(id, geometry.clone());
     }
 
     /// Detaches the geometry from the scene.
     ///
-    /// This function is thread-safe, thus multiple threads can detach
-    /// geometries from a scene at the same time.
+    /// Takes `&mut self`: detaching is exclusive, so it cannot run while a
+    /// query, commit, or another attach/detach is in progress on this
+    /// scene.
     pub fn detach_geometry(&mut self, id: u32) {
         unsafe {
             rtcDetachGeometry(self.handle, id);
         }
-        self.geometries.lock().unwrap().remove(&id);
+        self.geometries.remove(&id);
     }
 
     /// Returns the geometry bound to the specified geometry ID.
@@ -187,8 +228,7 @@ impl<'a> Scene<'a> {
         if raw.is_null() {
             None
         } else {
-            let geometries = self.geometries.lock().unwrap();
-            geometries.get(&id).cloned()
+            self.geometries.get(&id).cloned()
         }
     }
 
@@ -202,8 +242,7 @@ impl<'a> Scene<'a> {
         if raw.is_null() {
             None
         } else {
-            let geometries = self.geometries.lock().unwrap();
-            geometries.get(&id).cloned()
+            self.geometries.get(&id).cloned()
         }
     }
 
@@ -213,7 +252,7 @@ impl<'a> Scene<'a> {
     /// geometry-global flag, so this does not exclude a concurrent
     /// `intersect` on a *different* scene holding the same geometry).
     pub fn enable_geometry(&mut self, id: u32) {
-        if let Some(g) = self.geometries.lock().unwrap().get(&id) {
+        if let Some(g) = self.geometries.get(&id) {
             unsafe {
                 rtcEnableGeometry(g.shared.handle);
             }
@@ -224,7 +263,7 @@ impl<'a> Scene<'a> {
     /// [`Scene::enable_geometry`]); same `&mut self` / commit / multi-scene
     /// rules.
     pub fn disable_geometry(&mut self, id: u32) {
-        if let Some(g) = self.geometries.lock().unwrap().get(&id) {
+        if let Some(g) = self.geometries.get(&id) {
             unsafe { rtcDisableGeometry(g.shared.handle) };
         }
     }
@@ -233,7 +272,7 @@ impl<'a> Scene<'a> {
     /// re-reads it on the next commit. Requires `&mut self` (no live
     /// traversal).
     pub fn update_geometry_buffer(&mut self, id: u32, usage: BufferUsage, slot: u32) {
-        if let Some(g) = self.geometries.lock().unwrap().get(&id) {
+        if let Some(g) = self.geometries.get(&id) {
             unsafe { rtcUpdateGeometryBuffer(g.shared.handle, usage, slot) };
         }
     }
@@ -244,7 +283,7 @@ impl<'a> Scene<'a> {
     /// scene) for it to take effect. The common per-frame
     /// instance-animation path.
     pub fn set_geometry_transform(&mut self, id: u32, time_step: u32, transform: &[f32; 16]) {
-        if let Some(g) = self.geometries.lock().unwrap().get(&id) {
+        if let Some(g) = self.geometries.get(&id) {
             unsafe {
                 rtcSetGeometryTransform(
                     g.shared.handle,
@@ -261,7 +300,7 @@ impl<'a> Scene<'a> {
     /// [`Scene::update_geometry_buffer`]). Requires `&mut self` (no live
     /// traversal).
     pub fn commit_geometry(&mut self, id: u32) {
-        if let Some(g) = self.geometries.lock().unwrap().get(&id) {
+        if let Some(g) = self.geometries.get(&id) {
             unsafe { rtcCommitGeometry(g.shared.handle) };
         }
     }
@@ -286,8 +325,6 @@ impl<'a> Scene<'a> {
     ) -> Result<R, Error> {
         let geom = self
             .geometries
-            .lock()
-            .unwrap()
             .get(&id)
             .cloned()
             .ok_or(Error::INVALID_ARGUMENT)?;
@@ -329,7 +366,12 @@ impl<'a> Scene<'a> {
     /// Any API call that sets a property of the scene or geometries
     /// contained in the scene count as scene modification, e.g. including
     /// setting of intersection filter functions.
-    pub fn commit(&self) {
+    ///
+    /// This crate enforces that sequencing through the borrow checker: `commit`
+    /// and the scene mutators take `&mut self` while queries take `&self`, so a
+    /// scene shared for concurrent queries via `Arc<Scene>` cannot be committed
+    /// or mutated at the same time.
+    pub fn commit(&mut self) {
         unsafe {
             rtcCommitScene(self.handle);
         }
@@ -352,11 +394,29 @@ impl<'a> Scene<'a> {
     /// Multiple scene commit operations on different scenes can be running at
     /// the same time, hence it is possible to commit many small scenes in
     /// parallel, distributing the commits to many threads.
-    pub fn join_commit(&self) {
-        unsafe {
-            rtcJoinCommitScene(self.handle);
-        }
-    }
+    ///
+    /// Unlike [`commit`](Self::commit), this takes `&self`: its whole purpose
+    /// is for **several threads to call it concurrently on the same scene**
+    /// (share it via `Arc<Scene>`), all joining one build. That
+    /// cooperative-concurrency contract is the caller's to uphold, so it is
+    /// `unsafe`. For the common single-threaded case use
+    /// [`commit`](Self::commit) (which embree also recommends for
+    /// performance).
+    ///
+    /// # Safety
+    ///
+    /// embree synchronizes the concurrent `join_commit` callers *among
+    /// themselves* (that cooperation is the whole point of the call). What it
+    /// does **not** synchronize is a join-commit against other uses of the same
+    /// scene. So while any thread is inside `join_commit` for this scene, the
+    /// caller must guarantee that **no** thread runs a query
+    /// (`intersect`/`occluded`/`point_query`/`collide`), an ordinary
+    /// [`commit`](Self::commit), or any mutation
+    /// (`attach_geometry`/`detach_geometry`/`set_flags`/`set_build_quality`/
+    /// `set_progress_monitor_function`/...) on it. Only other `join_commit`
+    /// calls on this scene may run concurrently. Violating this is undefined
+    /// behavior.
+    pub unsafe fn join_commit(&self) { rtcJoinCommitScene(self.handle); }
 
     /// Set the scene flags. Multiple flags can be enabled using an OR
     /// operation. See [`SceneFlags`] for all possible flags.
@@ -375,7 +435,7 @@ impl<'a> Scene<'a> {
     ///   edges of neighboring primitives.
     /// - CONTEXT_FILTER_FUNCTION: Enables support for a filter function inside
     ///   the intersection context for this scene.
-    pub fn set_flags(&self, flags: SceneFlags) {
+    pub fn set_flags(&mut self, flags: SceneFlags) {
         unsafe {
             rtcSetSceneFlags(self.handle, flags);
         }
@@ -388,7 +448,7 @@ impl<'a> Scene<'a> {
     /// ```no_run
     /// use embree3::{Device, Scene, SceneFlags};
     /// let device = Device::new().unwrap();
-    /// let scene = device.create_scene().unwrap();
+    /// let mut scene = device.create_scene().unwrap();
     /// let flags = scene.get_flags();
     /// scene.set_flags(flags | SceneFlags::ROBUST);
     /// ```
@@ -518,7 +578,7 @@ impl<'a> Scene<'a> {
     ///
     /// - [`BuildQuality::REFIT`]: Uses a BVH refitting approach when changing
     ///   only the vertex buffer.
-    pub fn set_build_quality(&self, quality: BuildQuality) {
+    pub fn set_build_quality(&mut self, quality: BuildQuality) {
         unsafe {
             rtcSetSceneBuildQuality(self.handle, quality);
         }
@@ -553,7 +613,10 @@ impl<'a> Scene<'a> {
     where
         F: Fn(f64) -> bool + Send + Sync + 'static,
     {
-        let mut progress_fn = self.progress_monitor_fn.lock().unwrap();
+        // `&mut self` is exclusive (Scene is not Clone), so no `commit` can be reading
+        // the old closure while we replace it. Storing the new `ErasedFn` drops
+        // the old one only after embree has been pointed at the new boxed
+        // closure's stable address.
         let erased = ErasedFn::new(progress);
         unsafe {
             rtcSetSceneProgressMonitorFunction(
@@ -562,16 +625,15 @@ impl<'a> Scene<'a> {
                 erased.as_ptr(),
             );
         }
-        *progress_fn = Some(erased);
+        self.progress_monitor_fn = Some(erased);
     }
 
     /// Unregister the progress monitor callback function.
     pub fn unset_progress_monitor_function(&mut self) {
-        let mut progress_fn = self.progress_monitor_fn.lock().unwrap();
         unsafe {
             rtcSetSceneProgressMonitorFunction(self.handle, None, ::std::ptr::null_mut());
         }
-        *progress_fn = None;
+        self.progress_monitor_fn = None;
     }
 
     /// Finds the closest hit of a single ray with the scene.
@@ -634,9 +696,8 @@ impl<'a> Scene<'a> {
     ///   more information.
     /// * `ray` - The ray packet of size 4 to intersect with the scene. The ray
     ///   packet must be aligned to 16 bytes.
-    /// * `valid` - A mask indicating which rays in the packet are valid. -1
-    ///   means
-    ///  valid, 0 means invalid.
+    /// * `valid` - Per-lane validity mask ([`ValidMaskN`]): each lane is
+    ///   [`ValidMask::Valid`] (`-1`) or [`ValidMask::Invalid`] (`0`).
     ///
     /// The ray packet pointer passed to callback functions is not guaranteed to
     /// be identical to the original ray provided. To extend the ray with
@@ -649,7 +710,7 @@ impl<'a> Scene<'a> {
         &self,
         ctx: &mut C,
         ray: &mut RayHit4,
-        valid: &[i32; 4],
+        valid: &ValidMaskN<4>,
     ) {
         unsafe {
             rtcIntersect4(
@@ -674,9 +735,8 @@ impl<'a> Scene<'a> {
     ///   more information.
     /// * `ray` - The ray packet of size 8 to intersect with the scene. The ray
     ///   packet must be aligned to 32 bytes.
-    /// * `valid` - A mask indicating which rays in the packet are valid. -1
-    ///   means
-    ///  valid, 0 means invalid.
+    /// * `valid` - Per-lane validity mask ([`ValidMaskN`]): each lane is
+    ///   [`ValidMask::Valid`] (`-1`) or [`ValidMask::Invalid`] (`0`).
     ///
     /// The ray packet pointer passed to callback functions is not guaranteed to
     /// be identical to the original ray provided. To extend the ray with
@@ -689,7 +749,7 @@ impl<'a> Scene<'a> {
         &self,
         ctx: &mut C,
         ray: &mut RayHit8,
-        valid: &[i32; 8],
+        valid: &ValidMaskN<8>,
     ) {
         unsafe {
             rtcIntersect8(
@@ -714,9 +774,8 @@ impl<'a> Scene<'a> {
     ///   more information.
     /// * `ray` - The ray packet of size 16 to intersect with the scene. The ray
     ///   packet must be aligned to 64 bytes.
-    /// * `valid` - A mask indicating which rays in the packet are valid. -1
-    ///   means
-    ///  valid, 0 means invalid.
+    /// * `valid` - Per-lane validity mask ([`ValidMaskN`]): each lane is
+    ///   [`ValidMask::Valid`] (`-1`) or [`ValidMask::Invalid`] (`0`).
     ///
     /// The ray packet pointer passed to callback functions is not guaranteed to
     /// be identical to the original ray provided. To extend the ray with
@@ -729,7 +788,7 @@ impl<'a> Scene<'a> {
         &self,
         ctx: &mut C,
         ray: &mut RayHit16,
-        valid: &[i32; 16],
+        valid: &ValidMaskN<16>,
     ) {
         unsafe {
             rtcIntersect16(
@@ -778,9 +837,8 @@ impl<'a> Scene<'a> {
     ///   more information.
     /// * `ray` - The ray packet of size 4 to intersect with the scene. The ray
     ///   packet must be aligned to 16 bytes.
-    /// * `valid` - A mask indicating which rays in the packet are valid. -1
-    ///   means
-    ///  valid, 0 means invalid.
+    /// * `valid` - Per-lane validity mask ([`ValidMaskN`]): each lane is
+    ///   [`ValidMask::Valid`] (`-1`) or [`ValidMask::Invalid`] (`0`).
     ///
     /// The ray packet pointer passed to callback functions is not guaranteed to
     /// be identical to the original ray provided. To extend the ray with
@@ -789,7 +847,12 @@ impl<'a> Scene<'a> {
     ///
     /// Only active rays are processed, and hit data of inactive rays is not
     /// changed.
-    pub fn occluded4<C: AsIntersectContext>(&self, ctx: &mut C, ray: &mut Ray4, valid: &[i32; 4]) {
+    pub fn occluded4<C: AsIntersectContext>(
+        &self,
+        ctx: &mut C,
+        ray: &mut Ray4,
+        valid: &ValidMaskN<4>,
+    ) {
         unsafe {
             rtcOccluded4(
                 valid.as_ptr(),
@@ -814,9 +877,8 @@ impl<'a> Scene<'a> {
     ///   more information.
     /// * `ray` - The ray packet of size 8 to intersect with the scene. The ray
     ///   packet must be aligned to 32 bytes.
-    /// * `valid` - A mask indicating which rays in the packet are valid. -1
-    ///   means
-    ///  valid, 0 means invalid.
+    /// * `valid` - Per-lane validity mask ([`ValidMaskN`]): each lane is
+    ///   [`ValidMask::Valid`] (`-1`) or [`ValidMask::Invalid`] (`0`).
     ///
     /// The ray packet pointer passed to callback functions is not guaranteed to
     /// be identical to the original ray provided. To extend the ray with
@@ -825,7 +887,12 @@ impl<'a> Scene<'a> {
     ///
     /// Only active rays are processed, and hit data of inactive rays is not
     /// changed.
-    pub fn occluded8<C: AsIntersectContext>(&self, ctx: &mut C, ray: &mut Ray8, valid: &[i32; 8]) {
+    pub fn occluded8<C: AsIntersectContext>(
+        &self,
+        ctx: &mut C,
+        ray: &mut Ray8,
+        valid: &ValidMaskN<8>,
+    ) {
         unsafe {
             rtcOccluded8(
                 valid.as_ptr(),
@@ -850,9 +917,8 @@ impl<'a> Scene<'a> {
     ///   more information.
     /// * `ray` - The ray packet of size 16 to intersect with the scene. The ray
     ///   packet must be aligned to 64 bytes.
-    /// * `valid` - A mask indicating which rays in the packet are valid. -1
-    ///   means
-    ///  valid, 0 means invalid.
+    /// * `valid` - Per-lane validity mask ([`ValidMaskN`]): each lane is
+    ///   [`ValidMask::Valid`] (`-1`) or [`ValidMask::Invalid`] (`0`).
     ///
     /// The ray packet pointer passed to callback functions is not guaranteed to
     /// be identical to the original ray provided. To extend the ray with
@@ -865,7 +931,7 @@ impl<'a> Scene<'a> {
         &self,
         ctx: &mut C,
         ray: &mut Ray16,
-        valid: &[i32; 16],
+        valid: &ValidMaskN<16>,
     ) {
         unsafe {
             rtcOccluded16(
@@ -1077,6 +1143,92 @@ impl<'a> Scene<'a> {
         }
     }
 
+    /// Reports candidate colliding primitive pairs between this scene and
+    /// `other`.
+    ///
+    /// embree traverses the two scenes' BVHs and invokes `callback` with
+    /// batches of [`Collision`]s. This is a **broad phase**: each reported
+    /// pair is a potentially-intersecting primitive pair from a leaf pair
+    /// reached during traversal. embree does **not** test the individual
+    /// primitive (or even leaf) bounds before reporting, so a reported
+    /// pair's bounds need not overlap. The callback must do the
+    /// narrow-phase primitive/primitive test itself to reject false
+    /// positives, and accumulate results into its captured state. The batch
+    /// slice is `&mut` so the callback may compact it in place (e.g. keep
+    /// only the surviving pairs) as scratch; embree ignores the slice after
+    /// the call. Pass the same scene as both `self` and `other`
+    /// for self-collision; embree omits the `(primitive, same primitive)` pair
+    /// but does **not** guarantee ordering or uniqueness (it may report both
+    /// `(A, B)` and `(B, A)`).
+    ///
+    /// The callback runs on multiple worker threads, so `F` is `Fn + Sync` and
+    /// any captured state must be shared safely (e.g. atomics or a `Mutex`).
+    /// Each invocation gets its own batch, so the `&mut` slice never aliases
+    /// across threads.
+    ///
+    /// # Safety
+    ///
+    /// embree validates these only in debug builds, and even then incompletely
+    /// (its geometry check uses `&&`, so it misses the case where only *one*
+    /// scene is invalid). The caller must guarantee all of:
+    /// - both scenes are **committed** (since their last modification);
+    /// - both were created on the **same [`Device`](crate::Device)**;
+    /// - both contain **only user geometries**, each with a **single time
+    ///   step**;
+    /// - both are **non-empty** (at least one enabled primitive). embree
+    ///   represents an empty (or multi-accel) scene with an `AccelN`, but the
+    ///   collider casts both scenes' acceleration structures to a single `BVH`;
+    /// - both use the **same BVH layout** -- in particular the same `COMPACT`
+    ///   scene flag. embree picks one collider (`BVH4` vs `BVH8`, which differ
+    ///   on AVX hardware) from `self` and applies it to *both* scenes' nodes,
+    ///   so a mismatch reinterprets the other scene's nodes at the wrong width;
+    /// - the `callback` must **not** mutate, commit, attach to, or detach from
+    ///   either scene (or their geometries) while `collide` is running.
+    ///
+    /// Violating any of these is undefined behavior in a release embree. (A
+    /// fully safe wrapper would have to track per-scene committed state,
+    /// time-step counts, emptiness, and BVH layout; until then this is
+    /// `unsafe`.)
+    pub unsafe fn collide<F>(&self, other: &Scene, callback: F)
+    where
+        F: Fn(&mut [Collision]) + Sync,
+    {
+        // The callback fires on embree's worker threads and `rtcCollide` blocks until
+        // done, so `callback` only needs to live for this call: pass a pointer
+        // to it directly (no heap ownership). The trampoline is monomorphized
+        // over `F`.
+        unsafe extern "C" fn trampoline<F>(
+            user_ptr: *mut std::os::raw::c_void,
+            collisions: *mut RTCCollision,
+            num: std::os::raw::c_uint,
+        ) where
+            F: Fn(&mut [Collision]) + Sync,
+        {
+            // Never unwind across the FFI boundary: a panic on a worker thread aborts.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let cb = &*(user_ptr as *const F);
+                // Each callback owns a distinct batch array, so a `&mut` view is sound
+                // even though `cb` is shared across threads. The callback may scribble
+                // on it (compact in place); embree discards it afterwards.
+                let pairs =
+                    std::slice::from_raw_parts_mut(collisions as *mut Collision, num as usize);
+                cb(pairs);
+            }));
+            if result.is_err() {
+                std::process::abort();
+            }
+        }
+
+        unsafe {
+            rtcCollide(
+                self.handle,
+                other.handle,
+                Some(trampoline::<F>),
+                &callback as *const F as *mut std::os::raw::c_void,
+            );
+        }
+    }
+
     /// Returns the axis-aligned bounding box of the scene.
     pub fn get_bounds(&self) -> Bounds {
         let mut bounds = Bounds {
@@ -1203,4 +1355,20 @@ where
     }
 
     Some(inner::<F, D>)
+}
+
+#[cfg(test)]
+mod valid_mask_tests {
+    //! `ValidMaskN` must be 16-byte aligned so it reaches embree without a
+    //! copy. Pure-Rust.
+    use super::ValidMaskN;
+
+    #[test]
+    fn valid_mask_is_16_byte_aligned() {
+        assert_eq!(std::mem::align_of::<ValidMaskN<4>>(), 16);
+        assert_eq!(std::mem::align_of::<ValidMaskN<8>>(), 16);
+        assert_eq!(std::mem::align_of::<ValidMaskN<16>>(), 16);
+        let m = ValidMaskN::<8>::all_active();
+        assert_eq!(m.as_ptr() as usize % 16, 0, "mask must be 16-aligned");
+    }
 }

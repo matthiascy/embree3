@@ -24,10 +24,24 @@
 //! | `rtcGetSceneDevice` | [`Scene::device`] | The scene already tracks (and hands back) its [`Device`]; the raw getter would only duplicate it. |
 //! | `rtcSetDeviceProperty` | *(none)* | Embree exposes **no public writable device properties** (the only settable ones are hidden internal debug integers), so a wrapper would reject every public `DeviceProperty`. Use [`Device::get_property`] for the read-only queries. |
 //! | `rtcRetainBVH` | *(none)* | [`Bvh`] is a non-`Clone` build target (the build result borrows it exclusively), so there is never a second handle to retain; `rtcReleaseBVH` runs once in `Drop`. |
+//! | `rtcRetainScene` | `Arc<Scene>` | [`Scene`] is a non-`Clone` unique owner of its handle (so `&mut Scene` stays exclusive for mutation/commit); share a committed scene with `Arc<Scene>`. There is never a second handle to retain, and `rtcReleaseScene` runs once in `Drop`. |
 //!
 //! Two further functions, `rtcGetGeometryUserData` and `rtcRetainGeometry`, are
 //! not exposed because the crate's geometry ownership model (an internal `Arc`
 //! plus a lock-free callback table) supersedes them; no user action is needed.
+//!
+//! # Panics in callbacks
+//!
+//! User closures registered as embree callbacks (geometry
+//! intersect/occluded/bounds/filter/displacement, the scene progress monitor,
+//! point queries, the BVH builder, and [`Scene::collide`]) run behind embree's
+//! non-unwinding `extern "C"` ABI. A panic that escapes such a callback
+//! **aborts the process** -- Rust turns an unwind that reaches a non-`-unwind`
+//! `extern "C"` boundary into an abort, so this is defined behavior, not UB.
+//! The hot per-ray/per-primitive trampolines therefore call the closure
+//! directly (no per-call `catch_unwind` landing pad). Handle recoverable errors
+//! *inside* the closure (e.g. record them in captured state); do not rely on
+//! catching a panic across a query.
 
 extern crate core;
 
@@ -314,6 +328,13 @@ pub type PointQuery16 = sys::RTCPointQuery16;
 
 /// Primitives that can be used to build a BVH.
 pub type BuildPrimitive = sys::RTCBuildPrimitive;
+
+/// A candidate colliding primitive pair reported by [`Scene::collide`]: the
+/// `geomID`/`primID` of one primitive in each scene. It is a
+/// potentially-intersecting pair from a leaf pair reached during broad-phase
+/// traversal; embree does not test the bounds before reporting, so the pair's
+/// bounds need not overlap and the callback must narrow-phase.
+pub type Collision = sys::RTCCollision;
 
 /// Utility for making specifically aligned vector.
 ///

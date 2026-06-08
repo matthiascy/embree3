@@ -307,7 +307,7 @@ impl<'a> RayN<'a> {
 
     /// Returns the hit point of the `i`th ray.
     pub fn hit_point(&self, i: usize) -> [f32; 3] {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         let mut p = self.org(i);
         let d = self.dir(i);
         let t = self.tfar(i);
@@ -320,7 +320,7 @@ impl<'a> RayN<'a> {
 
 impl<'a> SoARay for RayN<'a> {
     fn org(&self, i: usize) -> [f32; 3] {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe {
             let ptr = self.ptr as *const f32;
             [
@@ -332,7 +332,7 @@ impl<'a> SoARay for RayN<'a> {
     }
 
     fn set_org(&mut self, i: usize, o: [f32; 3]) {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe {
             let ptr = self.ptr as *mut f32;
             *ptr.add(i) = o[0];
@@ -342,7 +342,7 @@ impl<'a> SoARay for RayN<'a> {
     }
 
     fn dir(&self, i: usize) -> [f32; 3] {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe {
             let ptr = self.ptr as *const f32;
             [
@@ -354,7 +354,7 @@ impl<'a> SoARay for RayN<'a> {
     }
 
     fn set_dir(&mut self, i: usize, d: [f32; 3]) {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe {
             let ptr = self.ptr as *mut f32;
             *ptr.add(4 * self.len + i) = d[0];
@@ -364,75 +364,118 @@ impl<'a> SoARay for RayN<'a> {
     }
 
     fn tnear(&self, i: usize) -> f32 {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe { *(self.ptr as *const f32).add(3 * self.len + i) }
     }
 
     fn set_tnear(&mut self, i: usize, t: f32) {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe {
             *(self.ptr as *mut f32).add(3 * self.len + i) = t;
         }
     }
 
     fn tfar(&self, i: usize) -> f32 {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe { *(self.ptr as *const f32).add(8 * self.len + i) }
     }
 
     fn set_tfar(&mut self, i: usize, t: f32) {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe {
             *(self.ptr as *mut f32).add(8 * self.len + i) = t;
         }
     }
 
     fn time(&self, i: usize) -> f32 {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe { *(self.ptr as *const f32).add(7 * self.len + i) }
     }
 
     fn set_time(&mut self, i: usize, t: f32) {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe {
             *(self.ptr as *mut f32).add(7 * self.len + i) = t;
         }
     }
 
     fn mask(&self, i: usize) -> u32 {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe { *(self.ptr as *const u32).add(9 * self.len + i) }
     }
 
     fn set_mask(&mut self, i: usize, m: u32) {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe {
             *(self.ptr as *mut u32).add(9 * self.len + i) = m;
         }
     }
 
     fn id(&self, i: usize) -> u32 {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe { *(self.ptr as *const u32).add(10 * self.len + i) }
     }
 
     fn set_id(&mut self, i: usize, id: u32) {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe {
             *(self.ptr as *mut u32).add(10 * self.len + i) = id;
         }
     }
 
     fn flags(&self, i: usize) -> u32 {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe { *(self.ptr as *const u32).add(11 * self.len + i) }
     }
 
     fn set_flags(&mut self, i: usize, f: u32) {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe {
             *(self.ptr as *mut u32).add(11 * self.len + i) = f;
         }
+    }
+}
+
+impl<'a> RayN<'a> {
+    /// Gather lane `i` into a single-ray [`Ray`] **with no bounds check**.
+    ///
+    /// `#[inline(always)]` so the SoA reads inline into the caller (a
+    /// proven-in-range lane handle), leaving no out-of-line call or per-field
+    /// `cmp`/panic branch. The column offsets match the checked [`SoARay`]
+    /// accessors above (a unit test asserts they agree).
+    ///
+    /// # Safety
+    ///
+    /// `i < self.len()`.
+    #[inline(always)]
+    pub(crate) unsafe fn gather_unchecked(&self, i: usize) -> Ray {
+        let n = self.len;
+        let f = self.ptr as *const f32;
+        let u = self.ptr as *const u32;
+        Ray {
+            org_x: *f.add(i),
+            org_y: *f.add(n + i),
+            org_z: *f.add(2 * n + i),
+            tnear: *f.add(3 * n + i),
+            dir_x: *f.add(4 * n + i),
+            dir_y: *f.add(5 * n + i),
+            dir_z: *f.add(6 * n + i),
+            time: *f.add(7 * n + i),
+            tfar: *f.add(8 * n + i),
+            mask: *u.add(9 * n + i),
+            id: *u.add(10 * n + i),
+            flags: *u.add(11 * n + i),
+        }
+    }
+
+    /// Scatter `tfar` into lane `i` **with no bounds check**.
+    ///
+    /// # Safety
+    ///
+    /// `i < self.len()`.
+    #[inline(always)]
+    pub(crate) unsafe fn set_tfar_unchecked(&mut self, i: usize, tfar: f32) {
+        *(self.ptr as *mut f32).add(8 * self.len + i) = tfar;
     }
 }
 
@@ -449,7 +492,7 @@ pub struct HitN<'a> {
 
 impl<'a> SoAHit for HitN<'a> {
     fn normal(&self, i: usize) -> [f32; 3] {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe {
             [
                 *(self.ptr as *const f32).add(i),
@@ -462,7 +505,7 @@ impl<'a> SoAHit for HitN<'a> {
     fn unit_normal(&self, i: usize) -> [f32; 3] { normalise_vector3(self.normal(i)) }
 
     fn set_normal(&mut self, i: usize, n: [f32; 3]) {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe {
             let ptr = self.ptr as *mut f32;
             *(ptr).add(i) = n[0];
@@ -472,7 +515,7 @@ impl<'a> SoAHit for HitN<'a> {
     }
 
     fn uv(&self, i: usize) -> [f32; 2] {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe {
             [
                 *(self.ptr as *const f32).add(3 * self.len + i),
@@ -482,17 +525,17 @@ impl<'a> SoAHit for HitN<'a> {
     }
 
     fn u(&self, i: usize) -> f32 {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe { *(self.ptr as *const f32).add(3 * self.len + i) }
     }
 
     fn v(&self, i: usize) -> f32 {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe { *(self.ptr as *const f32).add(4 * self.len + i) }
     }
 
     fn set_uv(&mut self, i: usize, uv: [f32; 2]) {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe {
             let ptr = self.ptr as *mut f32;
             *(ptr).add(3 * self.len + i) = uv[0];
@@ -501,50 +544,50 @@ impl<'a> SoAHit for HitN<'a> {
     }
 
     fn set_u(&mut self, i: usize, u: f32) {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe {
             *(self.ptr as *mut f32).add(3 * self.len + i) = u;
         }
     }
 
     fn set_v(&mut self, i: usize, v: f32) {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe {
             *(self.ptr as *mut f32).add(4 * self.len + i) = v;
         }
     }
 
     fn prim_id(&self, i: usize) -> u32 {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe { *(self.ptr as *const u32).add(5 * self.len + i) }
     }
 
     fn set_prim_id(&mut self, i: usize, id: u32) {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe {
             *(self.ptr as *mut u32).add(5 * self.len + i) = id;
         }
     }
 
     fn geom_id(&self, i: usize) -> u32 {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe { *(self.ptr as *const u32).add(6 * self.len + i) }
     }
 
     fn set_geom_id(&mut self, i: usize, id: u32) {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe {
             *(self.ptr as *mut u32).add(6 * self.len + i) = id;
         }
     }
 
     fn inst_id(&self, i: usize) -> u32 {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe { *(self.ptr as *const u32).add(7 * self.len + i) }
     }
 
     fn set_inst_id(&mut self, i: usize, id: u32) {
-        debug_assert!(i < self.len, "index out of bounds");
+        assert!(i < self.len, "index out of bounds");
         unsafe {
             *(self.ptr as *mut u32).add(7 * self.len + i) = id;
         }
@@ -557,6 +600,30 @@ impl<'a> HitN<'a> {
 
     /// Returns true if the packet is empty.
     pub const fn is_empty(&self) -> bool { self.len == 0 }
+
+    /// Scatter a single [`Hit`] into lane `i` **with no bounds check**.
+    ///
+    /// `#[inline(always)]` so the SoA writes inline into the caller (a
+    /// proven-in-range lane handle). Column offsets match the checked
+    /// [`SoAHit`] setters above (a unit test asserts they agree).
+    ///
+    /// # Safety
+    ///
+    /// `i < self.len()`.
+    #[inline(always)]
+    pub(crate) unsafe fn scatter_unchecked(&mut self, i: usize, hit: &Hit) {
+        let n = self.len;
+        let f = self.ptr as *mut f32;
+        let u = self.ptr as *mut u32;
+        *f.add(i) = hit.Ng_x;
+        *f.add(n + i) = hit.Ng_y;
+        *f.add(2 * n + i) = hit.Ng_z;
+        *f.add(3 * n + i) = hit.u;
+        *f.add(4 * n + i) = hit.v;
+        *u.add(5 * n + i) = hit.primID;
+        *u.add(6 * n + i) = hit.geomID;
+        *u.add(7 * n + i) = hit.instID[0];
+    }
 }
 
 /// Combined ray and hit packet of runtime size.
@@ -592,4 +659,104 @@ impl<'a> RayHitN<'a> {
 
     /// Returns true if the packet is empty.
     pub fn is_empty(&self) -> bool { self.len == 0 }
+}
+
+#[cfg(test)]
+mod oob_tests {
+    //! Lane bounds checks must be unconditional (not `debug_assert!`), so an
+    //! out-of-bounds lane panics in release as well as debug. Pure-Rust (no
+    //! FFI): a `RayN` view over a stack SoA buffer of `len` lanes.
+    use super::*;
+
+    fn ray_n_over(buf: &mut [f32], len: usize) -> RayN<'_> {
+        RayN {
+            ptr: buf.as_mut_ptr() as *mut sys::RTCRayN,
+            len,
+            marker: PhantomData,
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "index out of bounds")]
+    fn ray_n_org_out_of_bounds_panics() {
+        let mut buf = [0.0f32; 12 * 4]; // RTCRayN SoA: at least 12 floats per lane
+        let r = ray_n_over(&mut buf, 4);
+        let _ = r.org(4); // lane 4 is outside [0, 4)
+    }
+
+    #[test]
+    fn ray_n_org_in_bounds_ok() {
+        let mut buf = [0.0f32; 12 * 4];
+        let r = ray_n_over(&mut buf, 4);
+        assert_eq!(r.org(3), [0.0, 0.0, 0.0]);
+    }
+
+    // Guards the unchecked gather/scatter column offsets against the checked
+    // `SoARay`/`SoAHit` accessors: if either drifts, these fail.
+    #[test]
+    fn gather_unchecked_matches_checked_ray() {
+        let mut r4 = Ray4::new(
+            [
+                [1.0, 2.0, 3.0],
+                [4.0, 5.0, 6.0],
+                [7.0, 8.0, 9.0],
+                [10.0, 11.0, 12.0],
+            ],
+            [
+                [0.1, 0.2, 0.3],
+                [0.4, 0.5, 0.6],
+                [0.7, 0.8, 0.9],
+                [1.0, 1.1, 1.2],
+            ],
+        );
+        for i in 0..4 {
+            r4.set_tfar(i, 100.0 + i as f32);
+            r4.set_time(i, 0.25 * i as f32);
+            r4.set_mask(i, i as u32 + 1);
+            r4.set_id(i, i as u32 * 7);
+            r4.set_flags(i, i as u32 + 3);
+        }
+        let view = RayN {
+            ptr: &mut r4 as *mut Ray4 as *mut sys::RTCRayN,
+            len: 4,
+            marker: PhantomData,
+        };
+        for i in 0..4 {
+            let u = unsafe { view.gather_unchecked(i) };
+            assert_eq!([u.org_x, u.org_y, u.org_z], view.org(i));
+            assert_eq!([u.dir_x, u.dir_y, u.dir_z], view.dir(i));
+            assert_eq!(u.tnear, view.tnear(i));
+            assert_eq!(u.tfar, view.tfar(i));
+            assert_eq!(u.time, view.time(i));
+            assert_eq!(u.mask, view.mask(i));
+            assert_eq!(u.id, view.id(i));
+            assert_eq!(u.flags, view.flags(i));
+        }
+    }
+
+    #[test]
+    fn scatter_unchecked_matches_checked_hit() {
+        let mut h4 = Hit4::new();
+        let mut view = HitN {
+            ptr: &mut h4 as *mut Hit4 as *mut sys::RTCHitN,
+            len: 4,
+            marker: PhantomData,
+        };
+        let hit = Hit {
+            Ng_x: 1.0,
+            Ng_y: 2.0,
+            Ng_z: 3.0,
+            u: 0.5,
+            v: 0.6,
+            primID: 7,
+            geomID: 9,
+            instID: [11],
+        };
+        unsafe { view.scatter_unchecked(2, &hit) };
+        assert_eq!(view.normal(2), [1.0, 2.0, 3.0]);
+        assert_eq!(view.uv(2), [0.5, 0.6]);
+        assert_eq!(view.prim_id(2), 7);
+        assert_eq!(view.geom_id(2), 9);
+        assert_eq!(view.inst_id(2), 11);
+    }
 }

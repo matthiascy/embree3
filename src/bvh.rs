@@ -550,9 +550,13 @@ impl<'id, B: BvhBuilder> BvhResult<'id, B> {
     pub fn root(&self) -> Option<&B::Node<'id>> { self.root.map(|p| unsafe { p.ptr.as_ref() }) }
     /// The root handle.
     pub fn root_ptr(&self) -> Option<NodePtr<'id, B::Node<'id>>> { self.root }
-    /// Resolve a child handle to a node reference. Safe: the brand proves
-    /// same-build, the `&self` borrow keeps the arena alive, no runtime
-    /// check.
+    /// Resolve a child handle to a node reference. Safe with no runtime check:
+    /// the `'id` brand proves the handle came from this same build, and the
+    /// arena cannot have been freed or rebuilt -- the generative `build_scoped`
+    /// closure that produced this [`BvhResult`] holds the `&mut Bvh`
+    /// exclusively for its whole duration, so no rebuild or drop can run
+    /// while `'id` is live. (The returned reference borrows `self`, tying
+    /// it to the result handle.)
     pub fn resolve(&self, p: NodePtr<'id, B::Node<'id>>) -> &B::Node<'id> {
         unsafe { p.ptr.as_ref() }
     }

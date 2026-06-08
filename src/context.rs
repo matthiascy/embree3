@@ -88,6 +88,36 @@ impl IntersectContext {
             instID: [u32::MAX; 1],
         }
     }
+
+    /// Recover the per-ray extension `T` from a context inside a callback.
+    ///
+    /// Callbacks (geometry intersect/occluded/filter functions) receive the
+    /// base `&IntersectContext` that embree carried through unchanged from
+    /// the query. If the query passed an [`IntersectContextExt<T>`], its
+    /// `ext: T` sits directly after the base context, and this returns it.
+    ///
+    /// # Safety
+    ///
+    /// The ray query that produced this callback **must** have used an
+    /// [`IntersectContextExt<T>`] with the *same* `T`. This reinterprets the
+    /// bytes following the base context as `T`; calling it with a different
+    /// `T`, or when the query used a plain [`IntersectContext`], is
+    /// undefined behavior. embree gives no way to check this at runtime,
+    /// which is why it is `unsafe` and localized to the exact callback that
+    /// needs the extension, rather than baked into the callback's type.
+    pub unsafe fn ext<T>(&self) -> &T {
+        &(*(self as *const IntersectContext as *const IntersectContextExt<T>)).ext
+    }
+
+    /// Mutable [`ext`](Self::ext).
+    ///
+    /// # Safety
+    ///
+    /// Same as [`ext`](Self::ext): the query must have used a matching
+    /// [`IntersectContextExt<T>`].
+    pub unsafe fn ext_mut<T>(&mut self) -> &mut T {
+        &mut (*(self as *mut IntersectContext as *mut IntersectContextExt<T>)).ext
+    }
 }
 
 unsafe impl AsIntersectContext for IntersectContext {
@@ -107,6 +137,16 @@ unsafe impl AsIntersectContext for IntersectContext {
 /// As Embree 3 does not support placing additional data at the end of the ray
 /// structure, and accessing that data inside user geometry callbacks and filter
 /// callback functions, we have to attach the data to the ray query context.
+///
+/// Pass an `IntersectContextExt<E>` to a query: the query accepts any
+/// `C: `[`AsIntersectContext`] and uses its base [`IntersectContext`] for the
+/// FFI call. Callbacks receive only the **base**
+/// `&mut IntersectContext` (the callback type is not generic over `E`), so they
+/// recover the `E` with the `unsafe` [`IntersectContext::ext`] /
+/// [`IntersectContext::ext_mut`] (or, in user intersect/occluded callbacks,
+/// [`IntersectFunctionNArgs::context_ext`](crate::IntersectFunctionNArgs::context_ext)
+/// / `context_ext_mut`). The recovery is `unsafe` because the callback must
+/// know the query used a matching `E` -- see [`IntersectContext::ext`].
 #[repr(C)]
 #[derive(Debug)]
 pub struct IntersectContextExt<E>

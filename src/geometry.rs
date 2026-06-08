@@ -23,10 +23,10 @@ use std::{
 };
 
 use crate::{
-    buffer::required_layout_bytes, callback::ErasedFn, sys::*, AsIntersectContext, Bounds, Buffer,
-    BufferData, BufferLayout, BufferSize, BufferSource, BufferUsage, BufferView, BufferViewMut,
-    BuildQuality, Device, Error, Format, GeometryKind, Hit, HitN, QuaternionDecomposition, Ray,
-    RayN, Scene, SoAHit, SoARay, SubdivisionMode, UserData,
+    buffer::required_layout_bytes, callback::ErasedFn, sys::*, Bounds, Buffer, BufferData,
+    BufferLayout, BufferSize, BufferSource, BufferUsage, BufferView, BufferViewMut, BuildQuality,
+    Device, Error, Format, GeometryKind, Hit, HitN, IntersectContext, QuaternionDecomposition, Ray,
+    RayN, Scene, SoAHit, SubdivisionMode, UserData,
 };
 
 use std::{
@@ -881,11 +881,10 @@ impl<'buf> GeometryBuilder<'buf> {
     /// on exclusive `&mut` access to its captures, and everything it captures
     /// must be `Send + Sync`. The `Fn + Send + Sync` bounds on the closure
     /// enforce this.
-    pub fn set_intersect_filter_function<F, D, C>(&mut self, filter: F)
+    pub fn set_intersect_filter_function<F, D>(&mut self, filter: F)
     where
         D: UserData,
-        C: AsIntersectContext,
-        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
+        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut IntersectContext, Option<&D>)
             + Send
             + Sync
             + 'static,
@@ -895,7 +894,7 @@ impl<'buf> GeometryBuilder<'buf> {
         unsafe {
             rtcSetGeometryIntersectFilterFunction(
                 self.shared.handle,
-                trampoline::intersect_filter_function::<F, D, C>(),
+                trampoline::intersect_filter_function::<F, D>(),
             );
             self.install_callback(
                 CbKind::IntersectFilter,
@@ -922,11 +921,10 @@ impl<'buf> GeometryBuilder<'buf> {
     /// Use this when the geometry should own the data. To instead lend data you
     /// keep on the application side (zero-copy, no refcount), use
     /// [`set_intersect_filter_function_borrowed`](Self::set_intersect_filter_function_borrowed).
-    pub fn set_intersect_filter_function_owned<F, D, C>(&mut self, filter: F, data: D)
+    pub fn set_intersect_filter_function_owned<F, D>(&mut self, filter: F, data: D)
     where
         D: UserData,
-        C: AsIntersectContext,
-        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
+        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut IntersectContext, Option<&D>)
             + Send
             + Sync
             + 'static,
@@ -939,7 +937,7 @@ impl<'buf> GeometryBuilder<'buf> {
         unsafe {
             rtcSetGeometryIntersectFilterFunction(
                 self.shared.handle,
-                trampoline::intersect_filter_function::<F, D, C>(),
+                trampoline::intersect_filter_function::<F, D>(),
             );
             self.install_callback(
                 CbKind::IntersectFilter,
@@ -982,11 +980,10 @@ impl<'buf> GeometryBuilder<'buf> {
     /// drop(data); // ERROR: `data` is borrowed by `tri` for its `'buf`
     /// let _ = tri.commit(); // `tri` (holding the borrow) is still used here
     /// ```
-    pub fn set_intersect_filter_function_borrowed<F, D, C>(&mut self, filter: F, data: &'buf D)
+    pub fn set_intersect_filter_function_borrowed<F, D>(&mut self, filter: F, data: &'buf D)
     where
         D: UserData,
-        C: AsIntersectContext,
-        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
+        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut IntersectContext, Option<&D>)
             + Send
             + Sync
             + 'static,
@@ -1001,7 +998,7 @@ impl<'buf> GeometryBuilder<'buf> {
         unsafe {
             rtcSetGeometryIntersectFilterFunction(
                 self.shared.handle,
-                trampoline::intersect_filter_function::<F, D, C>(),
+                trampoline::intersect_filter_function::<F, D>(),
             );
             self.install_callback(CbKind::IntersectFilter, ErasedFn::new(filter), ptr, None);
         }
@@ -1043,11 +1040,10 @@ impl<'buf> GeometryBuilder<'buf> {
     /// on exclusive `&mut` access to its captures, and everything it captures
     /// must be `Send + Sync`. The `Fn + Send + Sync` bounds on the closure
     /// enforce this.
-    pub fn set_occluded_filter_function<F, D, C>(&mut self, filter: F)
+    pub fn set_occluded_filter_function<F, D>(&mut self, filter: F)
     where
         D: UserData,
-        C: AsIntersectContext,
-        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
+        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut IntersectContext, Option<&D>)
             + Send
             + Sync
             + 'static,
@@ -1057,7 +1053,7 @@ impl<'buf> GeometryBuilder<'buf> {
         unsafe {
             rtcSetGeometryOccludedFilterFunction(
                 self.shared.handle,
-                trampoline::occluded_filter_function::<F, D, C>(),
+                trampoline::occluded_filter_function::<F, D>(),
             );
             self.install_callback(
                 CbKind::OccludedFilter,
@@ -1073,11 +1069,10 @@ impl<'buf> GeometryBuilder<'buf> {
     /// See
     /// [`set_intersect_filter_function_owned`](Self::set_intersect_filter_function_owned)
     /// for the per-callback owned-vs-borrowed data model.
-    pub fn set_occluded_filter_function_owned<F, D, C>(&mut self, filter: F, data: D)
+    pub fn set_occluded_filter_function_owned<F, D>(&mut self, filter: F, data: D)
     where
         D: UserData,
-        C: AsIntersectContext,
-        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
+        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut IntersectContext, Option<&D>)
             + Send
             + Sync
             + 'static,
@@ -1090,7 +1085,7 @@ impl<'buf> GeometryBuilder<'buf> {
         unsafe {
             rtcSetGeometryOccludedFilterFunction(
                 self.shared.handle,
-                trampoline::occluded_filter_function::<F, D, C>(),
+                trampoline::occluded_filter_function::<F, D>(),
             );
             self.install_callback(
                 CbKind::OccludedFilter,
@@ -1106,11 +1101,10 @@ impl<'buf> GeometryBuilder<'buf> {
     /// See
     /// [`set_intersect_filter_function_borrowed`](Self::set_intersect_filter_function_borrowed)
     /// for the per-callback owned-vs-borrowed data model.
-    pub fn set_occluded_filter_function_borrowed<F, D, C>(&mut self, filter: F, data: &'buf D)
+    pub fn set_occluded_filter_function_borrowed<F, D>(&mut self, filter: F, data: &'buf D)
     where
         D: UserData,
-        C: AsIntersectContext,
-        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
+        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut IntersectContext, Option<&D>)
             + Send
             + Sync
             + 'static,
@@ -1125,7 +1119,7 @@ impl<'buf> GeometryBuilder<'buf> {
         unsafe {
             rtcSetGeometryOccludedFilterFunction(
                 self.shared.handle,
-                trampoline::occluded_filter_function::<F, D, C>(),
+                trampoline::occluded_filter_function::<F, D>(),
             );
             self.install_callback(CbKind::OccludedFilter, ErasedFn::new(filter), ptr, None);
         }
@@ -1283,7 +1277,7 @@ impl<'buf> GeometryBuilder<'buf> {
     /// # The callback
     ///
     /// The closure receives a single
-    /// [`&mut IntersectFunctionNArgs<C, D>`](IntersectFunctionNArgs) carrying
+    /// [`&mut IntersectFunctionNArgs<D>`](IntersectFunctionNArgs) carrying
     /// the ray packet, validity mask, intersection context,
     /// geometry/primitive IDs, and per-callback user data. Its task is to
     /// intersect each **active** lane (`args.valid_n()[i] != 0`) of the
@@ -1330,39 +1324,35 @@ impl<'buf> GeometryBuilder<'buf> {
     /// A user geometry that reports a hit and runs it through the filter chain:
     ///
     /// ```no_run
-    /// # use embree3::{
-    /// #     Device, GeometryKind, Hit, IntersectContext, IntersectFunctionNArgs, INVALID_ID,
-    /// # };
+    /// # use embree3::{Device, GeometryKind, Hit, IntersectFunctionNArgs, INVALID_ID};
     /// let device = Device::new().unwrap();
     /// let mut geom = device.create_geometry(GeometryKind::USER).unwrap();
     /// geom.set_primitive_count(1);
-    /// geom.set_intersect_function::<_, (), IntersectContext>(
-    ///     |args: &mut IntersectFunctionNArgs<'_, IntersectContext, ()>| {
-    ///         for i in 0..args.len() {
-    ///             if args.valid_n()[i] == 0 {
-    ///                 continue; // skip inactive lanes
-    ///             }
-    ///             let mut ray = args.ray(i);
-    ///             let t = 1.0_f32; // distance from your ray/primitive test
-    ///             if t > ray.tnear && t < ray.tfar {
-    ///                 let mut hit = Hit {
-    ///                     Ng_x: 0.0,
-    ///                     Ng_y: 0.0,
-    ///                     Ng_z: 1.0,
-    ///                     u: 0.0,
-    ///                     v: 0.0,
-    ///                     primID: args.prim_id(),
-    ///                     geomID: args.geom_id(),
-    ///                     instID: [INVALID_ID],
-    ///                 };
-    ///                 ray.tfar = t;
-    ///                 if args.filter_intersection(&mut ray, &mut hit) {
-    ///                     args.commit_hit(i, &ray, &hit);
-    ///                 }
+    /// geom.set_intersect_function::<_, ()>(|args: &mut IntersectFunctionNArgs<'_, ()>| {
+    ///     for i in 0..args.len() {
+    ///         if args.valid_n()[i] == 0 {
+    ///             continue; // skip inactive lanes
+    ///         }
+    ///         let mut ray = args.ray(i);
+    ///         let t = 1.0_f32; // distance from your ray/primitive test
+    ///         if t > ray.tnear && t < ray.tfar {
+    ///             let mut hit = Hit {
+    ///                 Ng_x: 0.0,
+    ///                 Ng_y: 0.0,
+    ///                 Ng_z: 1.0,
+    ///                 u: 0.0,
+    ///                 v: 0.0,
+    ///                 primID: args.prim_id(),
+    ///                 geomID: args.geom_id(),
+    ///                 instID: [INVALID_ID],
+    ///             };
+    ///             ray.tfar = t;
+    ///             if args.filter_intersection(&mut ray, &mut hit) {
+    ///                 args.commit_hit(i, &ray, &hit);
     ///             }
     ///         }
-    ///     },
-    /// );
+    ///     }
+    /// });
     /// ```
     ///
     /// - Within the user geometry intersect function, it is safe to trace new
@@ -1400,17 +1390,16 @@ impl<'buf> GeometryBuilder<'buf> {
     /// on exclusive `&mut` access to its captures, and everything it captures
     /// must be `Send + Sync`. The `Fn + Send + Sync` bounds on the closure
     /// enforce this.
-    pub fn set_intersect_function<F, D, C>(&mut self, intersect: F)
+    pub fn set_intersect_function<F, D>(&mut self, intersect: F)
     where
         D: UserData,
-        C: AsIntersectContext,
-        F: for<'a> Fn(&mut IntersectFunctionNArgs<'a, C, D>) + Send + Sync + 'static,
+        F: for<'a> Fn(&mut IntersectFunctionNArgs<'a, D>) + Send + Sync + 'static,
     {
         match self.shared.kind {
             GeometryKind::USER => unsafe {
                 rtcSetGeometryIntersectFunction(
                     self.shared.handle,
-                    trampoline::intersect_function::<F, D, C>(),
+                    trampoline::intersect_function::<F, D>(),
                 );
                 self.install_callback(
                     CbKind::UserIntersect,
@@ -1428,11 +1417,10 @@ impl<'buf> GeometryBuilder<'buf> {
     /// [`set_intersect_function`](Self::set_intersect_function). See
     /// [`set_intersect_filter_function_owned`](Self::set_intersect_filter_function_owned)
     /// for the per-callback owned-vs-borrowed data model. (User geometry only.)
-    pub fn set_intersect_function_owned<F, D, C>(&mut self, intersect: F, data: D)
+    pub fn set_intersect_function_owned<F, D>(&mut self, intersect: F, data: D)
     where
         D: UserData,
-        C: AsIntersectContext,
-        F: for<'a> Fn(&mut IntersectFunctionNArgs<'a, C, D>) + Send + Sync + 'static,
+        F: for<'a> Fn(&mut IntersectFunctionNArgs<'a, D>) + Send + Sync + 'static,
     {
         match self.shared.kind {
             GeometryKind::USER => unsafe {
@@ -1440,7 +1428,7 @@ impl<'buf> GeometryBuilder<'buf> {
                 let ptr = &*boxed as *const D as *const ();
                 rtcSetGeometryIntersectFunction(
                     self.shared.handle,
-                    trampoline::intersect_function::<F, D, C>(),
+                    trampoline::intersect_function::<F, D>(),
                 );
                 self.install_callback(
                     CbKind::UserIntersect,
@@ -1458,18 +1446,17 @@ impl<'buf> GeometryBuilder<'buf> {
     /// [`set_intersect_function`](Self::set_intersect_function). See
     /// [`set_intersect_filter_function_borrowed`](Self::set_intersect_filter_function_borrowed)
     /// for the per-callback owned-vs-borrowed data model. (User geometry only.)
-    pub fn set_intersect_function_borrowed<F, D, C>(&mut self, intersect: F, data: &'buf D)
+    pub fn set_intersect_function_borrowed<F, D>(&mut self, intersect: F, data: &'buf D)
     where
         D: UserData,
-        C: AsIntersectContext,
-        F: for<'a> Fn(&mut IntersectFunctionNArgs<'a, C, D>) + Send + Sync + 'static,
+        F: for<'a> Fn(&mut IntersectFunctionNArgs<'a, D>) + Send + Sync + 'static,
     {
         match self.shared.kind {
             GeometryKind::USER => unsafe {
                 let ptr = data as *const D as *const ();
                 rtcSetGeometryIntersectFunction(
                     self.shared.handle,
-                    trampoline::intersect_function::<F, D, C>(),
+                    trampoline::intersect_function::<F, D>(),
                 );
                 self.install_callback(CbKind::UserIntersect, ErasedFn::new(intersect), ptr, None);
             },
@@ -1498,7 +1485,7 @@ impl<'buf> GeometryBuilder<'buf> {
     /// # The callback
     ///
     /// The closure receives a single
-    /// [`&mut OccludedFunctionNArgs<C, D>`](OccludedFunctionNArgs) carrying the
+    /// [`&mut OccludedFunctionNArgs<D>`](OccludedFunctionNArgs) carrying the
     /// ray packet, validity mask, intersection context, geometry/primitive IDs,
     /// and per-callback user data. For each **active** lane
     /// (`args.valid_n()[i] != 0`) it tests whether the user primitive
@@ -1535,18 +1522,17 @@ impl<'buf> GeometryBuilder<'buf> {
     /// on exclusive `&mut` access to its captures, and everything it captures
     /// must be `Send + Sync`. The `Fn + Send + Sync` bounds on the closure
     /// enforce this.
-    pub fn set_occluded_function<F, D, C>(&mut self, occluded: F)
+    pub fn set_occluded_function<F, D>(&mut self, occluded: F)
     where
         D: UserData,
-        C: AsIntersectContext,
-        F: for<'a> Fn(&mut OccludedFunctionNArgs<'a, C, D>) + Send + Sync + 'static,
+        F: for<'a> Fn(&mut OccludedFunctionNArgs<'a, D>) + Send + Sync + 'static,
     {
         match self.shared.kind {
             GeometryKind::USER => {
                 unsafe {
                     rtcSetGeometryOccludedFunction(
                         self.shared.handle,
-                        trampoline::occluded_function::<F, D, C>(),
+                        trampoline::occluded_function::<F, D>(),
                     )
                 };
                 self.install_callback(
@@ -1565,11 +1551,10 @@ impl<'buf> GeometryBuilder<'buf> {
     /// [`set_occluded_function`](Self::set_occluded_function). See
     /// [`set_intersect_filter_function_owned`](Self::set_intersect_filter_function_owned)
     /// for the per-callback owned-vs-borrowed data model. (User geometry only.)
-    pub fn set_occluded_function_owned<F, D, C>(&mut self, occluded: F, data: D)
+    pub fn set_occluded_function_owned<F, D>(&mut self, occluded: F, data: D)
     where
         D: UserData,
-        C: AsIntersectContext,
-        F: for<'a> Fn(&mut OccludedFunctionNArgs<'a, C, D>) + Send + Sync + 'static,
+        F: for<'a> Fn(&mut OccludedFunctionNArgs<'a, D>) + Send + Sync + 'static,
     {
         match self.shared.kind {
             GeometryKind::USER => {
@@ -1578,7 +1563,7 @@ impl<'buf> GeometryBuilder<'buf> {
                 unsafe {
                     rtcSetGeometryOccludedFunction(
                         self.shared.handle,
-                        trampoline::occluded_function::<F, D, C>(),
+                        trampoline::occluded_function::<F, D>(),
                     )
                 };
                 self.install_callback(
@@ -1606,11 +1591,10 @@ impl<'buf> GeometryBuilder<'buf> {
     /// - `data`: A shared reference to the user data of the geometry, which is
     ///  passed to the callback when invoked. The caller must ensure that the
     /// geometry does not outlive the data.
-    pub fn set_occluded_function_borrowed<F, D, C>(&mut self, occluded: F, data: &'buf D)
+    pub fn set_occluded_function_borrowed<F, D>(&mut self, occluded: F, data: &'buf D)
     where
         D: UserData,
-        C: AsIntersectContext,
-        F: for<'a> Fn(&mut OccludedFunctionNArgs<'a, C, D>) + Send + Sync + 'static,
+        F: for<'a> Fn(&mut OccludedFunctionNArgs<'a, D>) + Send + Sync + 'static,
     {
         match self.shared.kind {
             GeometryKind::USER => {
@@ -1618,7 +1602,7 @@ impl<'buf> GeometryBuilder<'buf> {
                 unsafe {
                     rtcSetGeometryOccludedFunction(
                         self.shared.handle,
-                        trampoline::occluded_function::<F, D, C>(),
+                        trampoline::occluded_function::<F, D>(),
                     )
                 };
                 self.install_callback(CbKind::UserOccluded, ErasedFn::new(occluded), ptr, None);
@@ -2724,20 +2708,20 @@ impl_geometry_type!(InstanceGeometryBuilder, GeometryKind::INSTANCE,
 /// set `ray.tfar` to the candidate distance, call
 /// [`filter_intersection`](Self::filter_intersection), and on `true` commit
 /// with [`commit_hit`](Self::commit_hit). Skip lanes where `valid_n()[i] == 0`.
-pub struct IntersectFunctionNArgs<'a, C: AsIntersectContext, D: UserData> {
+pub struct IntersectFunctionNArgs<'a, D: UserData> {
     // The original FFI args pointer. Required by `rtcFilterIntersection`, and the
     // source of the ray/hit packet (`(*raw).rayhit`) and `N`. Valid only for the
     // duration of the callback invocation; `*const` makes the struct `!Send`/`!Sync`
     // so it cannot escape to another thread.
     raw: *const RTCIntersectFunctionNArguments,
     valid_n: ValidityN<'a>,
-    context: &'a mut C,
+    context: &'a mut IntersectContext,
     geom_id: u32,
     prim_id: u32,
     user_data: Option<&'a D>,
 }
 
-impl<'a, C: AsIntersectContext, D: UserData> IntersectFunctionNArgs<'a, C, D> {
+impl<'a, D: UserData> IntersectFunctionNArgs<'a, D> {
     /// Number of rays in the packet.
     pub fn len(&self) -> usize {
         // SAFETY: `raw` is the live args pointer for this callback invocation.
@@ -2753,11 +2737,27 @@ impl<'a, C: AsIntersectContext, D: UserData> IntersectFunctionNArgs<'a, C, D> {
     /// Mutable validity mask.
     pub fn valid_n_mut(&mut self) -> &mut ValidityN<'a> { &mut self.valid_n }
 
-    /// The intersection context.
-    pub fn context(&self) -> &C { self.context }
+    /// The base intersection context.
+    pub fn context(&self) -> &IntersectContext { self.context }
 
-    /// The intersection context, mutably.
-    pub fn context_mut(&mut self) -> &mut C { self.context }
+    /// The base intersection context, mutably.
+    pub fn context_mut(&mut self) -> &mut IntersectContext { self.context }
+
+    /// Recover the per-ray extension `T` from the context.
+    ///
+    /// # Safety
+    ///
+    /// The ray query that produced this callback must have used an
+    /// [`IntersectContextExt<T>`](crate::IntersectContextExt) with the same
+    /// `T`. See [`IntersectContext::ext`](crate::IntersectContext::ext).
+    pub unsafe fn context_ext<T>(&self) -> &T { self.context.ext::<T>() }
+
+    /// Mutable [`context_ext`](Self::context_ext).
+    ///
+    /// # Safety
+    ///
+    /// Same as [`context_ext`](Self::context_ext).
+    pub unsafe fn context_ext_mut<T>(&mut self) -> &mut T { self.context.ext_mut::<T>() }
 
     /// Geometry ID being intersected.
     pub fn geom_id(&self) -> u32 { self.geom_id }
@@ -2797,24 +2797,9 @@ impl<'a, C: AsIntersectContext, D: UserData> IntersectFunctionNArgs<'a, C, D> {
     /// (≈ embree's `rtcGetRayHitFromRayHitN`, ray part). `ray.tfar` is the
     /// current closest-hit distance for that lane.
     pub fn ray(&self, i: usize) -> Ray {
-        debug_assert!(i < self.len(), "ray index out of bounds");
-        let r = self.rays();
-        let org = r.org(i);
-        let dir = r.dir(i);
-        Ray {
-            org_x: org[0],
-            org_y: org[1],
-            org_z: org[2],
-            tnear: r.tnear(i),
-            dir_x: dir[0],
-            dir_y: dir[1],
-            dir_z: dir[2],
-            time: r.time(i),
-            tfar: r.tfar(i),
-            mask: r.mask(i),
-            id: r.id(i),
-            flags: r.flags(i),
-        }
+        assert!(i < self.len(), "ray index out of bounds");
+        // SAFETY: just checked `i < len`.
+        unsafe { self.ray_unchecked(i) }
     }
 
     /// Run a candidate single-ray `hit` (paired with its `ray`, whose `tfar` is
@@ -2850,15 +2835,9 @@ impl<'a, C: AsIntersectContext, D: UserData> IntersectFunctionNArgs<'a, C, D> {
     /// packet (≈ embree's `rtcCopyHitToHitN`). Single-level instancing only
     /// (`instID[0]`).
     pub fn commit_hit(&mut self, i: usize, ray: &Ray, hit: &Hit) {
-        debug_assert!(i < self.len(), "commit index out of bounds");
-        let mut rays = self.rays();
-        rays.set_tfar(i, ray.tfar);
-        let mut hits = self.hits();
-        hits.set_normal(i, [hit.Ng_x, hit.Ng_y, hit.Ng_z]);
-        hits.set_uv(i, [hit.u, hit.v]);
-        hits.set_prim_id(i, hit.primID);
-        hits.set_geom_id(i, hit.geomID);
-        hits.set_inst_id(i, hit.instID[0]);
+        assert!(i < self.len(), "commit index out of bounds");
+        // SAFETY: just checked `i < len`.
+        unsafe { self.commit_hit_unchecked(i, ray, hit) }
     }
 
     /// Convenience: [`filter_intersection`](Self::filter_intersection) then, on
@@ -2882,9 +2861,66 @@ impl<'a, C: AsIntersectContext, D: UserData> IntersectFunctionNArgs<'a, C, D> {
     /// Set lane `i`'s packet-ray `tfar` (to a candidate distance before a
     /// packet filter, or to restore it after a rejection).
     pub fn set_tfar(&mut self, i: usize, tfar: f32) {
-        debug_assert!(i < self.len(), "tfar index out of bounds");
-        let mut rays = self.rays();
-        rays.set_tfar(i, tfar);
+        assert!(i < self.len(), "tfar index out of bounds");
+        // SAFETY: just checked `i < len`.
+        unsafe { self.set_tfar_unchecked(i, tfar) }
+    }
+
+    // --- Unchecked gather/scatter primitives for the proven-in-range lane
+    // handles. The public `ray`/`commit_hit`/`set_tfar` above keep their bounds
+    // check; these omit it and are `#[inline(always)]`, so on the lane path the
+    // `RayN`/`HitN` SoA accesses inline to direct loads/stores with no per-field
+    // `cmp`/panic branch.
+
+    /// # Safety: `i < self.len()`.
+    #[inline(always)]
+    unsafe fn ray_unchecked(&self, i: usize) -> Ray { self.rays().gather_unchecked(i) }
+
+    /// # Safety: `i < self.len()`.
+    #[inline(always)]
+    unsafe fn commit_hit_unchecked(&mut self, i: usize, ray: &Ray, hit: &Hit) {
+        self.rays().set_tfar_unchecked(i, ray.tfar);
+        self.hits().scatter_unchecked(i, hit);
+    }
+
+    /// # Safety: `i < self.len()`.
+    #[inline(always)]
+    unsafe fn set_tfar_unchecked(&mut self, i: usize, tfar: f32) {
+        self.rays().set_tfar_unchecked(i, tfar);
+    }
+
+    /// Iterate the **active** lanes (`valid_n()[i] != 0`), skipping inactive
+    /// ones. Each [`IntersectLane`] handle carries its (already in-range,
+    /// active) index, so per-lane operations need no index argument:
+    ///
+    /// ```ignore
+    /// args.for_each_active_lane(|mut lane| {
+    ///     let mut ray = lane.ray();
+    ///     // ... compute a candidate `hit`, set `ray.tfar` ...
+    ///     if lane.filter_intersection(&mut ray, &mut hit) {
+    ///         lane.commit_hit(&ray, &hit);
+    ///     }
+    /// });
+    /// ```
+    ///
+    /// This is the safe replacement for the `for i in 0..len { if valid... }`
+    /// boilerplate. (A `for lane in ...` iterator yielding mutating handles
+    /// would be a *lending* iterator, which `std::iter::Iterator` cannot
+    /// express soundly; the closure form gives the same ergonomics with one
+    /// lane borrowed at a time.)
+    #[inline(always)]
+    pub fn for_each_active_lane(&mut self, mut f: impl for<'b> FnMut(IntersectLane<'a, 'b, D>)) {
+        let n = self.len();
+        for i in 0..n {
+            // SAFETY: `i < n`; read this lane of the validity mask directly,
+            // skipping the checked `ValidityN` index on this hot loop.
+            if unsafe { *self.valid_n.ptr.add(i) } != 0 {
+                f(IntersectLane {
+                    args: &mut *self,
+                    i,
+                });
+            }
+        }
     }
 
     /// Filter the whole packet in ONE `rtcFilterIntersection` call (`N =
@@ -2903,8 +2939,8 @@ impl<'a, C: AsIntersectContext, D: UserData> IntersectFunctionNArgs<'a, C, D> {
     /// rejected lanes yourself.
     pub fn filter_intersection_n(&mut self, hits: &mut [Hit], valid: &mut [i32]) {
         let n = self.len();
-        debug_assert_eq!(hits.len(), n, "hits length must equal packet width");
-        debug_assert_eq!(valid.len(), n, "valid length must equal packet width");
+        assert_eq!(hits.len(), n, "hits length must equal packet width");
+        assert_eq!(valid.len(), n, "valid length must equal packet width");
 
         // Stage an N-wide SoA candidate-hit scratch (separate from the packet's hit
         // block, so a rejected lane never leaves a stale hit there). RTCHitN SoA is
@@ -2965,20 +3001,76 @@ impl<'a, C: AsIntersectContext, D: UserData> IntersectFunctionNArgs<'a, C, D> {
     }
 }
 
+/// A single active lane of an intersect callback's packet, yielded by
+/// [`IntersectFunctionNArgs::for_each_active_lane`]. Its index is already known
+/// in-range and active, so the per-lane operations take no index argument.
+pub struct IntersectLane<'a, 'b, D: UserData> {
+    args: &'b mut IntersectFunctionNArgs<'a, D>,
+    i: usize,
+}
+
+impl<'a, 'b, D: UserData> IntersectLane<'a, 'b, D> {
+    // The per-lane operations call the `*_unchecked` primitives directly: the
+    // index is in range by construction (`for_each_active_lane` is the only
+    // constructor), so the bounds check is genuinely redundant and is omitted
+    // structurally (not just hinted to the optimizer).
+
+    /// This lane's index in the packet.
+    pub fn index(&self) -> usize { self.i }
+
+    /// Gather this lane's ray.
+    #[inline(always)]
+    pub fn ray(&self) -> Ray {
+        // SAFETY: `self.i` is in range by construction (see above).
+        unsafe { self.args.ray_unchecked(self.i) }
+    }
+
+    /// Run a candidate through the filter chain (see
+    /// [`IntersectFunctionNArgs::filter_intersection`]).
+    #[inline(always)]
+    pub fn filter_intersection(&mut self, ray: &mut Ray, hit: &mut Hit) -> bool {
+        self.args.filter_intersection(ray, hit)
+    }
+
+    /// Commit a surviving hit to this lane (see
+    /// [`IntersectFunctionNArgs::commit_hit`]).
+    #[inline(always)]
+    pub fn commit_hit(&mut self, ray: &Ray, hit: &Hit) {
+        // SAFETY: `self.i` is in range by construction (see above).
+        unsafe { self.args.commit_hit_unchecked(self.i, ray, hit) }
+    }
+
+    /// Set this lane's packet-ray `tfar`.
+    #[inline(always)]
+    pub fn set_tfar(&mut self, tfar: f32) {
+        // SAFETY: `self.i` is in range by construction (see above).
+        unsafe { self.args.set_tfar_unchecked(self.i, tfar) }
+    }
+
+    /// Geometry ID being intersected.
+    pub fn geom_id(&self) -> u32 { self.args.geom_id() }
+
+    /// Primitive ID being intersected.
+    pub fn prim_id(&self) -> u32 { self.args.prim_id() }
+
+    /// Per-callback user data.
+    pub fn user_data(&self) -> Option<&D> { self.args.user_data() }
+}
+
 /// Arguments handed to a user-geometry **occluded** callback registered via
 /// [`GeometryBuilder::set_occluded_function`]. The occlusion analogue of
 /// [`IntersectFunctionNArgs`]: there is no hit buffer in the packet, so on
 /// survival mark the lane occluded with [`set_occluded`](Self::set_occluded).
-pub struct OccludedFunctionNArgs<'a, C: AsIntersectContext, D: UserData> {
+pub struct OccludedFunctionNArgs<'a, D: UserData> {
     raw: *const RTCOccludedFunctionNArguments,
     valid_n: ValidityN<'a>,
-    context: &'a mut C,
+    context: &'a mut IntersectContext,
     geom_id: u32,
     prim_id: u32,
     user_data: Option<&'a D>,
 }
 
-impl<'a, C: AsIntersectContext, D: UserData> OccludedFunctionNArgs<'a, C, D> {
+impl<'a, D: UserData> OccludedFunctionNArgs<'a, D> {
     /// Number of rays in the packet.
     pub fn len(&self) -> usize {
         // SAFETY: `raw` is the live args pointer for this callback invocation.
@@ -2994,11 +3086,27 @@ impl<'a, C: AsIntersectContext, D: UserData> OccludedFunctionNArgs<'a, C, D> {
     /// Mutable validity mask.
     pub fn valid_n_mut(&mut self) -> &mut ValidityN<'a> { &mut self.valid_n }
 
-    /// The intersection context.
-    pub fn context(&self) -> &C { self.context }
+    /// The base intersection context.
+    pub fn context(&self) -> &IntersectContext { self.context }
 
-    /// The intersection context, mutably.
-    pub fn context_mut(&mut self) -> &mut C { self.context }
+    /// The base intersection context, mutably.
+    pub fn context_mut(&mut self) -> &mut IntersectContext { self.context }
+
+    /// Recover the per-ray extension `T` from the context.
+    ///
+    /// # Safety
+    ///
+    /// The ray query that produced this callback must have used an
+    /// [`IntersectContextExt<T>`](crate::IntersectContextExt) with the same
+    /// `T`. See [`IntersectContext::ext`](crate::IntersectContext::ext).
+    pub unsafe fn context_ext<T>(&self) -> &T { self.context.ext::<T>() }
+
+    /// Mutable [`context_ext`](Self::context_ext).
+    ///
+    /// # Safety
+    ///
+    /// Same as [`context_ext`](Self::context_ext).
+    pub unsafe fn context_ext_mut<T>(&mut self) -> &mut T { self.context.ext_mut::<T>() }
 
     /// Geometry ID being tested.
     pub fn geom_id(&self) -> u32 { self.geom_id }
@@ -3021,24 +3129,9 @@ impl<'a, C: AsIntersectContext, D: UserData> OccludedFunctionNArgs<'a, C, D> {
 
     /// Gather lane `i` of the packet into a contiguous single-ray [`Ray`].
     pub fn ray(&self, i: usize) -> Ray {
-        debug_assert!(i < self.len(), "ray index out of bounds");
-        let r = self.rays();
-        let org = r.org(i);
-        let dir = r.dir(i);
-        Ray {
-            org_x: org[0],
-            org_y: org[1],
-            org_z: org[2],
-            tnear: r.tnear(i),
-            dir_x: dir[0],
-            dir_y: dir[1],
-            dir_z: dir[2],
-            time: r.time(i),
-            tfar: r.tfar(i),
-            mask: r.mask(i),
-            id: r.id(i),
-            flags: r.flags(i),
-        }
+        assert!(i < self.len(), "ray index out of bounds");
+        // SAFETY: just checked `i < len`.
+        unsafe { self.ray_unchecked(i) }
     }
 
     /// Run a candidate occluder (`ray` + fully-initialized `hit`) through the
@@ -3065,9 +3158,9 @@ impl<'a, C: AsIntersectContext, D: UserData> OccludedFunctionNArgs<'a, C, D> {
     /// Mark lane `i` occluded by setting its `tfar` to `-inf` (embree's
     /// occlusion convention).
     pub fn set_occluded(&mut self, i: usize) {
-        debug_assert!(i < self.len(), "occluded index out of bounds");
-        let mut rays = self.rays();
-        rays.set_tfar(i, f32::NEG_INFINITY);
+        assert!(i < self.len(), "occluded index out of bounds");
+        // SAFETY: just checked `i < len`.
+        unsafe { self.set_occluded_unchecked(i) }
     }
 
     /// Convenience: [`filter_occlusion`](Self::filter_occlusion) then, on
@@ -3089,9 +3182,48 @@ impl<'a, C: AsIntersectContext, D: UserData> OccludedFunctionNArgs<'a, C, D> {
     /// Set lane `i`'s packet-ray `tfar` (candidate distance before a packet
     /// filter, or to restore it after a rejection).
     pub fn set_tfar(&mut self, i: usize, tfar: f32) {
-        debug_assert!(i < self.len(), "tfar index out of bounds");
-        let mut rays = self.rays();
-        rays.set_tfar(i, tfar);
+        assert!(i < self.len(), "tfar index out of bounds");
+        // SAFETY: just checked `i < len`.
+        unsafe { self.set_tfar_unchecked(i, tfar) }
+    }
+
+    // --- Unchecked gather/scatter primitives for the proven-in-range lane
+    // handles (see `IntersectFunctionNArgs`). The public methods above keep
+    // their bounds check; these omit it and are `#[inline(always)]`.
+
+    /// # Safety: `i < self.len()`.
+    #[inline(always)]
+    unsafe fn ray_unchecked(&self, i: usize) -> Ray { self.rays().gather_unchecked(i) }
+
+    /// # Safety: `i < self.len()`.
+    #[inline(always)]
+    unsafe fn set_occluded_unchecked(&mut self, i: usize) {
+        self.rays().set_tfar_unchecked(i, f32::NEG_INFINITY);
+    }
+
+    /// # Safety: `i < self.len()`.
+    #[inline(always)]
+    unsafe fn set_tfar_unchecked(&mut self, i: usize, tfar: f32) {
+        self.rays().set_tfar_unchecked(i, tfar);
+    }
+
+    /// Iterate the **active** lanes (`valid_n()[i] != 0`), skipping inactive
+    /// ones. Each [`OccludedLane`] handle carries its index; see
+    /// [`IntersectFunctionNArgs::for_each_active_lane`] for the rationale (a
+    /// safe lending `for` iterator is not expressible, so this is a
+    /// closure).
+    #[inline(always)]
+    pub fn for_each_active_lane(&mut self, mut f: impl for<'b> FnMut(OccludedLane<'a, 'b, D>)) {
+        let n = self.len();
+        for i in 0..n {
+            // SAFETY: `i < n`; direct validity-mask read, no checked index.
+            if unsafe { *self.valid_n.ptr.add(i) } != 0 {
+                f(OccludedLane {
+                    args: &mut *self,
+                    i,
+                });
+            }
+        }
     }
 
     /// Packet occlusion filter: ONE `rtcFilterOcclusion` call (`N = len()`)
@@ -3102,8 +3234,8 @@ impl<'a, C: AsIntersectContext, D: UserData> OccludedFunctionNArgs<'a, C, D> {
     /// `tfar` on rejected lanes.
     pub fn filter_occlusion_n(&mut self, hits: &mut [Hit], valid: &mut [i32]) {
         let n = self.len();
-        debug_assert_eq!(hits.len(), n, "hits length must equal packet width");
-        debug_assert_eq!(valid.len(), n, "valid length must equal packet width");
+        assert_eq!(hits.len(), n, "hits length must equal packet width");
+        assert_eq!(valid.len(), n, "valid length must equal packet width");
 
         // N-wide SoA candidate-hit scratch (see filter_intersection_n for layout).
         let mut scratch = [0u32; 8 * 16];
@@ -3161,25 +3293,77 @@ impl<'a, C: AsIntersectContext, D: UserData> OccludedFunctionNArgs<'a, C, D> {
     }
 }
 
+/// A single active lane of an occluded callback's packet, yielded by
+/// [`OccludedFunctionNArgs::for_each_active_lane`]. Its index is already known
+/// in-range and active.
+pub struct OccludedLane<'a, 'b, D: UserData> {
+    args: &'b mut OccludedFunctionNArgs<'a, D>,
+    i: usize,
+}
+
+impl<'a, 'b, D: UserData> OccludedLane<'a, 'b, D> {
+    // The per-lane operations call the `*_unchecked` primitives directly: the
+    // index is in range by construction (`for_each_active_lane` is the only
+    // constructor), so the bounds check is omitted structurally.
+
+    /// This lane's index in the packet.
+    pub fn index(&self) -> usize { self.i }
+
+    /// Gather this lane's ray.
+    #[inline(always)]
+    pub fn ray(&self) -> Ray {
+        // SAFETY: `self.i` is in range by construction (see above).
+        unsafe { self.args.ray_unchecked(self.i) }
+    }
+
+    /// Run a candidate through the occlusion filter chain (see
+    /// [`OccludedFunctionNArgs::filter_occlusion`]).
+    #[inline(always)]
+    pub fn filter_occlusion(&mut self, ray: &mut Ray, hit: &mut Hit) -> bool {
+        self.args.filter_occlusion(ray, hit)
+    }
+
+    /// Mark this lane occluded (see [`OccludedFunctionNArgs::set_occluded`]).
+    #[inline(always)]
+    pub fn set_occluded(&mut self) {
+        // SAFETY: `self.i` is in range by construction (see above).
+        unsafe { self.args.set_occluded_unchecked(self.i) }
+    }
+
+    /// Set this lane's packet-ray `tfar`.
+    #[inline(always)]
+    pub fn set_tfar(&mut self, tfar: f32) {
+        // SAFETY: `self.i` is in range by construction (see above).
+        unsafe { self.args.set_tfar_unchecked(self.i, tfar) }
+    }
+
+    /// Geometry ID being tested.
+    pub fn geom_id(&self) -> u32 { self.args.geom_id() }
+
+    /// Primitive ID being tested.
+    pub fn prim_id(&self) -> u32 { self.args.prim_id() }
+
+    /// Per-callback user data.
+    pub fn user_data(&self) -> Option<&D> { self.args.user_data() }
+}
+
 mod trampoline {
     use super::*;
 
     /// Helper function to convert a Rust closure to `RTCFilterFunctionN`
     /// callback for intersect.
-    pub(crate) fn intersect_filter_function<F, D, C>() -> RTCFilterFunctionN
+    pub(crate) fn intersect_filter_function<F, D>() -> RTCFilterFunctionN
     where
         D: UserData,
-        C: AsIntersectContext,
-        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
+        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut IntersectContext, Option<&D>)
             + Send
             + Sync
             + 'static,
     {
-        unsafe extern "C" fn inner<F, D, C>(args: *const RTCFilterFunctionNArguments)
+        unsafe extern "C" fn inner<F, D>(args: *const RTCFilterFunctionNArguments)
         where
             D: UserData,
-            C: AsIntersectContext,
-            F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
+            F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut IntersectContext, Option<&D>)
                 + Send
                 + Sync
                 + 'static,
@@ -3219,29 +3403,27 @@ mod trampoline {
                     len,
                     marker: PhantomData,
                 },
-                &mut *((*args).context as *mut _ as *mut C),
+                &mut *((*args).context as *mut IntersectContext),
                 user_data,
             );
         }
-        Some(inner::<F, D, C>)
+        Some(inner::<F, D>)
     }
 
     /// Helper function to convert a Rust closure to `RTCFilterFunctionN`
     /// callback for occluded.
-    pub(crate) fn occluded_filter_function<F, D, C>() -> RTCFilterFunctionN
+    pub(crate) fn occluded_filter_function<F, D>() -> RTCFilterFunctionN
     where
         D: UserData,
-        C: AsIntersectContext,
-        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
+        F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut IntersectContext, Option<&D>)
             + Send
             + Sync
             + 'static,
     {
-        unsafe extern "C" fn inner<F, D, C>(args: *const RTCFilterFunctionNArguments)
+        unsafe extern "C" fn inner<F, D>(args: *const RTCFilterFunctionNArguments)
         where
             D: UserData,
-            C: AsIntersectContext,
-            F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut C, Option<&D>)
+            F: for<'a> Fn(RayN<'a>, HitN<'a>, ValidityN<'a>, &mut IntersectContext, Option<&D>)
                 + Send
                 + Sync
                 + 'static,
@@ -3281,26 +3463,24 @@ mod trampoline {
                     len,
                     marker: PhantomData,
                 },
-                &mut *((*args).context as *mut _ as *mut C),
+                &mut *((*args).context as *mut IntersectContext),
                 user_data,
             );
         }
-        Some(inner::<F, D, C>)
+        Some(inner::<F, D>)
     }
 
     /// Helper function to convert a Rust closure to `RTCIntersectFunctionN`
     /// callback.
-    pub(crate) fn intersect_function<F, D, C>() -> RTCIntersectFunctionN
+    pub(crate) fn intersect_function<F, D>() -> RTCIntersectFunctionN
     where
         D: UserData,
-        C: AsIntersectContext,
-        F: for<'a> Fn(&mut IntersectFunctionNArgs<'a, C, D>) + Send + Sync + 'static,
+        F: for<'a> Fn(&mut IntersectFunctionNArgs<'a, D>) + Send + Sync + 'static,
     {
-        unsafe extern "C" fn inner<F, D, C>(args: *const RTCIntersectFunctionNArguments)
+        unsafe extern "C" fn inner<F, D>(args: *const RTCIntersectFunctionNArguments)
         where
             D: UserData,
-            C: AsIntersectContext,
-            F: for<'a> Fn(&mut IntersectFunctionNArgs<'a, C, D>) + Send + Sync + 'static,
+            F: for<'a> Fn(&mut IntersectFunctionNArgs<'a, D>) + Send + Sync + 'static,
         {
             let site = &*((*args).geometryUserPtr as *const CallSite);
             let slot = site.slots[CbKind::UserIntersect as usize];
@@ -3328,14 +3508,14 @@ mod trampoline {
                     len,
                     marker: PhantomData,
                 },
-                context: &mut *((*args).context as *mut _ as *mut C),
+                context: &mut *((*args).context as *mut IntersectContext),
                 geom_id: (*args).geomID,
                 prim_id: (*args).primID,
                 user_data,
             })
         }
 
-        Some(inner::<F, D, C>)
+        Some(inner::<F, D>)
     }
 
     /// Helper function to convert a Rust closure to `RTCBoundsFunction`
@@ -3381,17 +3561,15 @@ mod trampoline {
 
     /// Helper function to convert a Rust closure to `RTCOccludedFunctionN`
     /// callback.
-    pub(crate) fn occluded_function<F, D, C>() -> RTCOccludedFunctionN
+    pub(crate) fn occluded_function<F, D>() -> RTCOccludedFunctionN
     where
         D: UserData,
-        C: AsIntersectContext,
-        F: for<'a> Fn(&mut OccludedFunctionNArgs<'a, C, D>) + Send + Sync + 'static,
+        F: for<'a> Fn(&mut OccludedFunctionNArgs<'a, D>) + Send + Sync + 'static,
     {
-        unsafe extern "C" fn inner<F, D, C>(args: *const RTCOccludedFunctionNArguments)
+        unsafe extern "C" fn inner<F, D>(args: *const RTCOccludedFunctionNArguments)
         where
             D: UserData,
-            C: AsIntersectContext,
-            F: for<'a> Fn(&mut OccludedFunctionNArgs<'a, C, D>) + Send + Sync + 'static,
+            F: for<'a> Fn(&mut OccludedFunctionNArgs<'a, D>) + Send + Sync + 'static,
         {
             let site = &*((*args).geometryUserPtr as *const CallSite);
             let slot = site.slots[CbKind::UserOccluded as usize];
@@ -3418,14 +3596,14 @@ mod trampoline {
                     len: (*args).N as usize,
                     marker: PhantomData,
                 },
-                context: &mut *((*args).context as *mut _ as *mut C),
+                context: &mut *((*args).context as *mut IntersectContext),
                 geom_id: (*args).geomID,
                 prim_id: (*args).primID,
                 user_data,
             })
         }
 
-        Some(inner::<F, D, C>)
+        Some(inner::<F, D>)
     }
 
     /// Helper function to convert a Rust closure to `RTCDisplacementFunctionN`
@@ -3582,10 +3760,12 @@ impl<'a> ValidityN<'a> {
         }
     }
 
-    pub fn iter_mut<'b>(&'b mut self) -> ValidityNIterMut<'a, 'b> {
+    pub fn iter_mut(&mut self) -> ValidityNIterMut<'_> {
         ValidityNIterMut {
-            inner: self,
+            ptr: self.ptr as *mut i32,
+            len: self.len,
             cur: 0,
+            _marker: PhantomData,
         }
     }
 
@@ -3598,13 +3778,14 @@ impl<'a> Index<usize> for ValidityN<'a> {
     type Output = i32;
 
     fn index(&self, index: usize) -> &Self::Output {
-        debug_assert!(index < self.len, "index out of bounds");
+        assert!(index < self.len, "index out of bounds");
         unsafe { &*self.ptr.add(index) }
     }
 }
 
 impl<'a> IndexMut<usize> for ValidityN<'a> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        assert!(index < self.len, "index out of bounds");
         unsafe { &mut *(self.ptr.add(index) as *mut i32) }
     }
 }
@@ -3625,23 +3806,98 @@ impl<'a, 'b> Iterator for ValidityNIter<'a, 'b> {
     }
 }
 
-pub struct ValidityNIterMut<'a, 'b> {
-    inner: &'b mut ValidityN<'a>,
+/// Mutable iterator over a [`ValidityN`]'s lanes. Like [`std::slice::IterMut`],
+/// it owns the raw pointer and a `PhantomData<&'b mut i32>` borrow rather than
+/// the `ValidityN`, and yields `&'b mut i32` tied to that borrow -- so a
+/// yielded reference cannot outlive the iterator's borrow of the `ValidityN`
+/// (which would otherwise let safe code alias a lane).
+pub struct ValidityNIterMut<'b> {
+    ptr: *mut i32,
+    len: usize,
     cur: usize,
+    _marker: PhantomData<&'b mut i32>,
 }
 
-impl<'a, 'b> Iterator for ValidityNIterMut<'a, 'b> {
-    type Item = &'a mut i32;
+impl<'b> Iterator for ValidityNIterMut<'b> {
+    type Item = &'b mut i32;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.cur < self.inner.len {
+        if self.cur < self.len {
+            // SAFETY: `cur < len` keeps the pointer in range, and `cur` only ever
+            // advances, so each lane is yielded at most once -- the returned
+            // `&'b mut` never aliases another. `'b` is the borrow of the
+            // `ValidityN` this iterator was created from.
             unsafe {
-                let valid = self.inner.ptr.add(self.cur);
+                let p = self.ptr.add(self.cur);
                 self.cur += 1;
-                Some(&mut *(valid as *mut i32))
+                Some(&mut *p)
             }
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod validity_oob_tests {
+    //! `ValidityN` lane indexing must be unconditional (not `debug_assert!`),
+    //! so an out-of-bounds lane panics in release too. Pure-Rust (no FFI):
+    //! a view over a stack `[i32]`.
+    use super::*;
+
+    fn validity_over(buf: &[i32]) -> ValidityN<'_> {
+        ValidityN {
+            ptr: buf.as_ptr(),
+            len: buf.len(),
+            marker: PhantomData,
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "index out of bounds")]
+    fn validity_index_out_of_bounds_panics() {
+        let buf = [-1i32; 4];
+        let v = validity_over(&buf);
+        let _ = v[4];
+    }
+
+    #[test]
+    #[should_panic(expected = "index out of bounds")]
+    fn validity_index_mut_out_of_bounds_panics() {
+        let buf = [-1i32; 4];
+        let mut v = validity_over(&buf);
+        v[4] = 0; // index_mut: the assert fires before any write
+    }
+
+    #[test]
+    fn validity_index_in_bounds_ok() {
+        let buf = [-1i32, 0, -1, 0];
+        let v = validity_over(&buf);
+        assert_eq!(v[0], -1);
+        assert_eq!(v[3], 0);
+    }
+
+    // A view with write provenance (derived from a `&mut`), so `iter_mut`'s
+    // cast-back-to-`*mut` writes are sound (Miri-clean).
+    fn validity_over_mut(buf: &mut [i32]) -> ValidityN<'_> {
+        ValidityN {
+            ptr: buf.as_mut_ptr() as *const i32,
+            len: buf.len(),
+            marker: PhantomData,
+        }
+    }
+
+    #[test]
+    fn iter_mut_writes_each_lane_once() {
+        let mut buf = [-1i32; 4];
+        {
+            let mut v = validity_over_mut(&mut buf);
+            for (k, lane) in v.iter_mut().enumerate() {
+                *lane = k as i32;
+            }
+        }
+        // Each lane got a distinct `&mut` (no aliasing); the `'b`-tied lifetime is
+        // what prevents a yielded reference from escaping the iterator.
+        assert_eq!(buf, [0, 1, 2, 3]);
     }
 }

@@ -1,0 +1,20 @@
+# LeakSanitizer suppressions for embree's uninstrumented native dependencies.
+#
+# AddressSanitizer enables LeakSanitizer by default. embree (and oneTBB, when the
+# linked build uses TBB tasking) keep allocations alive until process exit -
+# device/scene caches, thread-pool state, ISA dispatch tables - which LSan
+# reports as "leaks" even though they are not this crate's. These entries
+# suppress leak reports rooted in those uninstrumented libraries, so only leaks
+# in this crate's own (instrumented) code are surfaced.
+#
+# CAVEAT - these are intentionally BROAD: a `leak:<lib>` pattern matches the whole
+# allocation stack, so a genuine leak in *this crate's* code whose allocation
+# happens during an embree callback (stack: embree -> our trampoline -> our
+# `Box`/`Arc`) would also be hidden. They err on the side of quiet because there
+# are no CI reports yet to derive precise patterns from. Once the AddressSanitizer
+# job has run in CI, narrow these to the specific embree/TBB allocator frames that
+# actually leak (`leak:<function>`) so real crate-side leaks routed through a
+# callback are no longer masked.
+leak:libembree3
+leak:libtbb
+leak:tbb

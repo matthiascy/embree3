@@ -5,7 +5,7 @@
 //! honoured (inactive lanes are never invoked).
 mod common;
 
-use embree3::{PointQuery, PointQuery4, PointQueryContext};
+use embree3::{PointQuery, PointQuery4, PointQueryContext, ValidMask, ValidMaskN};
 
 #[test]
 fn point_query_captures_state_and_returns_changed() {
@@ -59,7 +59,8 @@ fn point_query4_routes_per_lane_data_and_honours_valid() {
         time: [0.0; 4],
         radius: [1.0, 1.0, 1.0, 1.0],
     };
-    let valid: [i32; 4] = [-1, -1, -1, 0]; // lane 3 disabled
+    let mut valid = ValidMaskN::all_active();
+    valid.lanes_mut()[3] = ValidMask::Invalid; // lane 3 disabled
 
     let mut ctx = PointQueryContext::new();
     const SENTINEL: f32 = -42.0;
@@ -117,7 +118,7 @@ fn point_query4_returns_true_when_a_lane_reports_a_change() {
         time: [0.0; 4],
         radius: [1.0; 4],
     };
-    let valid = [-1i32; 4];
+    let valid = ValidMaskN::all_active();
     let mut ctx = PointQueryContext::new();
     let mut data = [(); 4]; // no per-lane state needed (D = ())
 

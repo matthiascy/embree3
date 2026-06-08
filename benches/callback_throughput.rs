@@ -54,7 +54,7 @@ fn build_filtered_scene() -> Scene<'static> {
 
     // Accept every hit (leave the valid mask untouched); the cost we measure is
     // the dispatch, not the body.
-    cube.set_intersect_filter_function::<_, (), IntersectContext>(|_r, _h, _v, _c, _ud| {});
+    cube.set_intersect_filter_function::<_, ()>(|_r, _h, _v, _c, _ud| {});
 
     let geom = cube.commit();
     scene.attach_geometry(&geom);

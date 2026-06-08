@@ -11,7 +11,7 @@ use std::sync::{
 
 use embree3::{
     Hit, IntersectContext, IntersectFunctionNArgs, OccludedFunctionNArgs, Ray4, RayHit4, SoAHit,
-    SoARay, ValidMask, INVALID_ID,
+    SoARay, ValidMask, ValidMaskN, INVALID_ID,
 };
 
 /// Builds a scene with a single user-geometry sphere, whose intersect callback
@@ -32,36 +32,34 @@ fn trace_sphere_with_filter(reject: bool) -> (bool, Vec<u32>, usize) {
 
     // Intersector: report a candidate hit at t=1.5, filter it, commit on
     // survivial.
-    sphere.set_intersect_function::<_, (), IntersectContext>(
-        move |args: &mut IntersectFunctionNArgs<'_, IntersectContext, ()>| {
-            for i in 0..args.len() {
-                if args.valid_n()[i] == 0 {
-                    continue; // skip inactive rays
-                }
-                let mut ray = args.ray(i);
-                let t = 1.5_f32;
-                if t > ray.tnear && t < ray.tfar {
-                    let mut hit = Hit {
-                        Ng_x: 0.0,
-                        Ng_y: 0.0,
-                        Ng_z: -1.0,
-                        u: 0.0,
-                        v: 0.0,
-                        primID: args.prim_id(),
-                        geomID: args.geom_id(),
-                        instID: [INVALID_ID], /* single-level, no instancing in this test
-                                               * Initialize hit properties */
-                    };
-                    ray.tfar = t; // candidate distance the filter will see
-                    if args.filter_intersection(&mut ray, &mut hit) {
-                        args.commit_hit(i, &ray, &hit);
-                    }
+    sphere.set_intersect_function::<_, ()>(move |args: &mut IntersectFunctionNArgs<'_, ()>| {
+        for i in 0..args.len() {
+            if args.valid_n()[i] == 0 {
+                continue; // skip inactive rays
+            }
+            let mut ray = args.ray(i);
+            let t = 1.5_f32;
+            if t > ray.tnear && t < ray.tfar {
+                let mut hit = Hit {
+                    Ng_x: 0.0,
+                    Ng_y: 0.0,
+                    Ng_z: -1.0,
+                    u: 0.0,
+                    v: 0.0,
+                    primID: args.prim_id(),
+                    geomID: args.geom_id(),
+                    instID: [INVALID_ID], /* single-level, no instancing in this test
+                                           * Initialize hit properties */
+                };
+                ray.tfar = t; // candidate distance the filter will see
+                if args.filter_intersection(&mut ray, &mut hit) {
+                    args.commit_hit(i, &ray, &hit);
                 }
             }
-        },
-    );
+        }
+    });
 
-    sphere.set_intersect_filter_function::<_, (), IntersectContext>(
+    sphere.set_intersect_filter_function::<_, ()>(
         move |_ray, hit, mut valid, _ctx, _user: Option<&()>| {
             calls_cb.fetch_add(1, Ordering::SeqCst);
             probe_cb.lock().unwrap().push(0xF11A ^ hit.prim_id(0));
@@ -128,36 +126,34 @@ fn trace_sphere_occlusion_with_filter(reject: bool) -> (bool, usize) {
 
     let mut sphere = common::user_sphere(&device);
 
-    sphere.set_occluded_function::<_, (), IntersectContext>(
-        move |args: &mut OccludedFunctionNArgs<'_, IntersectContext, ()>| {
-            for i in 0..args.len() {
-                if args.valid_n()[i] == 0 {
-                    continue; // skip inactive rays
-                }
-                let mut ray = args.ray(i);
-                let t = 1.5_f32;
-                if t > ray.tnear && t < ray.tfar {
-                    let mut hit = Hit {
-                        Ng_x: 0.0,
-                        Ng_y: 0.0,
-                        Ng_z: -1.0,
-                        u: 0.0,
-                        v: 0.0,
-                        primID: args.prim_id(),
-                        geomID: args.geom_id(),
-                        instID: [INVALID_ID], /* single-level, no instancing in this test
-                                               * Initialize hit properties */
-                    };
-                    ray.tfar = t; // candidate distance the filter will see
-                    if args.filter_occlusion(&mut ray, &mut hit) {
-                        args.set_occluded(i);
-                    }
+    sphere.set_occluded_function::<_, ()>(move |args: &mut OccludedFunctionNArgs<'_, ()>| {
+        for i in 0..args.len() {
+            if args.valid_n()[i] == 0 {
+                continue; // skip inactive rays
+            }
+            let mut ray = args.ray(i);
+            let t = 1.5_f32;
+            if t > ray.tnear && t < ray.tfar {
+                let mut hit = Hit {
+                    Ng_x: 0.0,
+                    Ng_y: 0.0,
+                    Ng_z: -1.0,
+                    u: 0.0,
+                    v: 0.0,
+                    primID: args.prim_id(),
+                    geomID: args.geom_id(),
+                    instID: [INVALID_ID], /* single-level, no instancing in this test
+                                           * Initialize hit properties */
+                };
+                ray.tfar = t; // candidate distance the filter will see
+                if args.filter_occlusion(&mut ray, &mut hit) {
+                    args.set_occluded(i);
                 }
             }
-        },
-    );
+        }
+    });
 
-    sphere.set_occluded_filter_function::<_, (), IntersectContext>(
+    sphere.set_occluded_filter_function::<_, ()>(
         move |_ray, _hit, mut valid, _ctx, _user: Option<&()>| {
             calls_cb.fetch_add(1, Ordering::SeqCst);
             if reject {
@@ -213,37 +209,35 @@ fn filter_rejecting_nearest_returns_farther_hit() {
 
     let mut sphere = common::user_sphere(&device);
 
-    sphere.set_intersect_function::<_, (), IntersectContext>(
-        move |args: &mut IntersectFunctionNArgs<'_, IntersectContext, ()>| {
-            for i in 0..args.len() {
-                if args.valid_n()[i] == 0 {
-                    continue;
-                }
-                for &t in &[1.5_f32, 2.5_f32] {
-                    let mut ray = args.ray(i);
-                    if t > ray.tnear && t < ray.tfar {
-                        let mut hit = Hit {
-                            Ng_x: 0.0,
-                            Ng_y: 0.0,
-                            Ng_z: -1.0,
-                            u: 0.0,
-                            v: 0.0,
-                            primID: args.prim_id(),
-                            geomID: args.geom_id(),
-                            instID: [INVALID_ID],
-                        };
-                        ray.tfar = t;
-                        if args.filter_intersection(&mut ray, &mut hit) {
-                            args.commit_hit(i, &ray, &hit);
-                        }
+    sphere.set_intersect_function::<_, ()>(move |args: &mut IntersectFunctionNArgs<'_, ()>| {
+        for i in 0..args.len() {
+            if args.valid_n()[i] == 0 {
+                continue;
+            }
+            for &t in &[1.5_f32, 2.5_f32] {
+                let mut ray = args.ray(i);
+                if t > ray.tnear && t < ray.tfar {
+                    let mut hit = Hit {
+                        Ng_x: 0.0,
+                        Ng_y: 0.0,
+                        Ng_z: -1.0,
+                        u: 0.0,
+                        v: 0.0,
+                        primID: args.prim_id(),
+                        geomID: args.geom_id(),
+                        instID: [INVALID_ID],
+                    };
+                    ray.tfar = t;
+                    if args.filter_intersection(&mut ray, &mut hit) {
+                        args.commit_hit(i, &ray, &hit);
                     }
                 }
             }
-        },
-    );
+        }
+    });
 
     // Reject exactly the first hit the filter is shown; accept thereafter.
-    sphere.set_intersect_filter_function::<_, (), IntersectContext>(
+    sphere.set_intersect_filter_function::<_, ()>(
         move |_ray, _hit, mut valid, _ctx, _user: Option<&()>| {
             if seen_cb.fetch_add(1, Ordering::SeqCst) == 0 {
                 valid[0] = 0; // reject the first (nearer) hit
@@ -283,44 +277,42 @@ fn packet_filter_intersection_n_rejects_per_lane() {
 
     let mut sphere = common::user_sphere(&device);
 
-    sphere.set_intersect_function::<_, (), IntersectContext>(
-        move |args: &mut IntersectFunctionNArgs<'_, IntersectContext, ()>| {
-            let n = args.len();
-            let t = 1.5f32;
-            let mut hits = vec![
-                Hit {
-                    primID: args.prim_id(),
-                    geomID: args.geom_id(),
-                    ..Default::default()
-                };
-                n
-            ];
-            let mut valid = vec![ValidMask::Valid as i32; n];
-            let mut cached_tfar = vec![0.0; n];
-            for i in 0..n {
-                let ray = args.ray(i);
-                cached_tfar[i] = ray.tfar;
-                if args.valid_n()[i] != ValidMask::Invalid && t > ray.tnear && t < ray.tfar {
-                    args.set_tfar(i, t); // candidate distance the filter will
-                                         // see
-                } else {
-                    valid[i] = ValidMask::Invalid as i32;
-                }
+    sphere.set_intersect_function::<_, ()>(move |args: &mut IntersectFunctionNArgs<'_, ()>| {
+        let n = args.len();
+        let t = 1.5f32;
+        let mut hits = vec![
+            Hit {
+                primID: args.prim_id(),
+                geomID: args.geom_id(),
+                ..Default::default()
+            };
+            n
+        ];
+        let mut valid = vec![ValidMask::Valid as i32; n];
+        let mut cached_tfar = vec![0.0; n];
+        for i in 0..n {
+            let ray = args.ray(i);
+            cached_tfar[i] = ray.tfar;
+            if args.valid_n()[i] != ValidMask::Invalid && t > ray.tnear && t < ray.tfar {
+                args.set_tfar(i, t); // candidate distance the filter will
+                                     // see
+            } else {
+                valid[i] = ValidMask::Invalid as i32;
             }
-            args.filter_intersection_n(&mut hits, &mut valid);
-            for i in 0..n {
-                if valid[i] != ValidMask::Invalid as i32 {
-                    let r = args.ray(i); // tfar == t
-                    args.commit_hit(i, &r, &hits[i]);
-                } else {
-                    args.set_tfar(i, cached_tfar[i]); // restore rejected /
-                                                      // inative lanes
-                }
+        }
+        args.filter_intersection_n(&mut hits, &mut valid);
+        for i in 0..n {
+            if valid[i] != ValidMask::Invalid as i32 {
+                let r = args.ray(i); // tfar == t
+                args.commit_hit(i, &r, &hits[i]);
+            } else {
+                args.set_tfar(i, cached_tfar[i]); // restore rejected /
+                                                  // inative lanes
             }
-        },
-    );
+        }
+    });
 
-    sphere.set_intersect_filter_function::<_, (), IntersectContext>(
+    sphere.set_intersect_filter_function::<_, ()>(
         move |ray, _hit, mut valid, _ctx, _user: Option<&()>| {
             calls_cb.fetch_add(1, Ordering::SeqCst);
             for i in 0..ray.len() {
@@ -348,7 +340,7 @@ fn packet_filter_intersection_n_rejects_per_lane() {
         ray4.set_id(i, i as u32);
     }
     let mut rh = RayHit4::new(ray4);
-    let valid = [-1i32; 4];
+    let valid = ValidMaskN::all_active();
     let mut ctx = IntersectContext::coherent();
     scene.intersect4(&mut ctx, &mut rh, &valid);
 

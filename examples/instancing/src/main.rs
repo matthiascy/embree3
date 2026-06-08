@@ -204,7 +204,7 @@ fn main() {
     };
 
     let state = DebugState {
-        scene: scene.clone(),
+        scene,
         user: user_state,
     };
 

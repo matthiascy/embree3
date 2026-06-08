@@ -3,8 +3,6 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
-use embree3::IntersectContext;
-
 #[test]
 fn capturing_intersect_filter_is_invoked_with_live_state() {
     let deviec = common::device();
@@ -16,7 +14,7 @@ fn capturing_intersect_filter_is_invoked_with_live_state() {
     let probe_in_cb = probe.clone();
 
     let mut tri = common::unit_triangle(&deviec);
-    tri.set_intersect_filter_function::<_, (), IntersectContext>(
+    tri.set_intersect_filter_function::<_, ()>(
         move |_ray, _hit, valid, _ctx, _user: Option<&()>| {
             probe_in_cb
                 .lock()

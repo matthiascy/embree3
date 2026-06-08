@@ -16,13 +16,13 @@ fn each_callback_sees_its_own_data() {
     let from_occluded = Arc::new(Mutex::new(None::<i32>));
     let (ci, co) = (from_intersect.clone(), from_occluded.clone());
 
-    tri.set_intersect_filter_function_owned::<_, i32, IntersectContext>(
+    tri.set_intersect_filter_function_owned::<_, i32>(
         move |_r, _h, _v, _c, ud| {
             *ci.lock().unwrap() = ud.copied();
         },
         7i32,
     );
-    tri.set_occluded_filter_function_owned::<_, i32, IntersectContext>(
+    tri.set_occluded_filter_function_owned::<_, i32>(
         move |_r, _h, _v, _c, ud| {
             *co.lock().unwrap() = ud.copied();
         },
@@ -61,14 +61,14 @@ fn replacing_callback_swaps_closure_and_its_own_data() {
     let seen = Arc::new(Mutex::new(String::new()));
     let (sa, sb) = (seen.clone(), seen.clone());
 
-    tri.set_intersect_filter_function_owned::<_, i32, IntersectContext>(
+    tri.set_intersect_filter_function_owned::<_, i32>(
         move |_r, _h, _v, _c, _ud| {
             let _hold = &a_alive;
             *sa.lock().unwrap() = "A".into();
         },
         7i32,
     );
-    tri.set_intersect_filter_function_owned::<_, f32, IntersectContext>(
+    tri.set_intersect_filter_function_owned::<_, f32>(
         move |_r, _h, _v, _c, ud| {
             *sb.lock().unwrap() = format!("B:{:?}", ud.copied());
         },
@@ -102,10 +102,7 @@ fn owned_data_dropped_once_and_readable_via_getter() {
     let device = common::device();
     let mut tri = common::unit_triangle(&device);
 
-    tri.set_intersect_filter_function_owned::<_, Witness, IntersectContext>(
-        |_r, _h, _v, _c, _ud| {},
-        Witness(1),
-    );
+    tri.set_intersect_filter_function_owned::<_, Witness>(|_r, _h, _v, _c, _ud| {}, Witness(1));
     assert_eq!(DROPS.load(Ordering::SeqCst), 0);
     assert_eq!(
         tri.callback_data::<Witness>(CbKind::IntersectFilter)
@@ -114,10 +111,7 @@ fn owned_data_dropped_once_and_readable_via_getter() {
     );
 
     // replaces -> Witness(1) dropped once
-    tri.set_intersect_filter_function_owned::<_, Witness, IntersectContext>(
-        |_r, _h, _v, _c, _ud| {},
-        Witness(2),
-    );
+    tri.set_intersect_filter_function_owned::<_, Witness>(|_r, _h, _v, _c, _ud| {}, Witness(2));
     assert_eq!(
         DROPS.load(Ordering::SeqCst),
         1,
@@ -151,7 +145,7 @@ fn borrowed_data_reaches_callback_zero_copy() {
 
     let seen = Arc::new(Mutex::new(None::<u32>));
     let sc = seen.clone();
-    tri.set_intersect_filter_function_borrowed::<_, Vec<u32>, IntersectContext>(
+    tri.set_intersect_filter_function_borrowed::<_, Vec<u32>>(
         move |_r, _h, _v, _c, ud| {
             *sc.lock().unwrap() = ud.map(|t| t.iter().copied().sum::<u32>());
         },
