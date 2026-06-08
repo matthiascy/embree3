@@ -7,3 +7,7 @@ Cargo.lock
 
 # Upstream Embree C source, kept locally for reference (not part of this crate)
 /embree/
+
+# Local-dev docs (design notes, plans, specs, the Embree API PDF) -- not part of
+# the published crate.
+/dev-docs/

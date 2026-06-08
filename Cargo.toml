@@ -6,7 +6,7 @@ authors = [
     "Yang Chen <matthiasychen@gmail.com>",
 ]
 homepage = "https://github.com/matthiascy/embree3"
-# documentation = "https://docs.rs/embree3/"
+documentation = "https://docs.rs/embree3/"
 repository = "https://github.com/matthiascy/embree3"
 readme = "README.md"
 license = "MIT"
@@ -44,6 +44,11 @@ harness = false
 
 [features]
 log = ["dep:log"]
+
+# docs.rs builds without an Embree install (see the DOCS_RS guard in build.rs);
+# enable all features so every item is documented.
+[package.metadata.docs.rs]
+all-features = true
 
 [workspace]
 members = ["examples/*"]
