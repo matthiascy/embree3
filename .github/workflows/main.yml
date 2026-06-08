@@ -49,22 +49,21 @@ jobs:
       - name: FFI concurrency tests under ThreadSanitizer
         env:
           RUSTFLAGS: "-Zsanitizer=thread"
-          # embree's parallel build/commit runs on an uninstrumented oneTBB pool;
-          # suppress TSAN's false positives in those native libs (see the file).
-          TSAN_OPTIONS: "suppressions=${{ github.workspace }}/tsan-suppressions.txt"
-        # `--test-threads=1`: run one test function at a time so the harness does
-        # not create/use two embree devices concurrently. Distinct devices share
-        # embree's process-global state (ISA/config init, an internal std::string),
-        # and concurrent first-touch of it races in embree's *uninstrumented*
-        # internals -- a false positive whose racy frames are in libstdc++
-        # (std::string / operator new), so the `called_from_lib:libembree3`
-        # suppressions miss it. Each test's *own* concurrency (TBB workers, spawned
-        # threads) still runs, so this crate's code is still checked for races.
+          # Only this crate's code (and std, via -Zbuild-std) is instrumented;
+          # embree, oneTBB, libstdc++ and libc are not. `ignore_noninstrumented_modules=1`
+          # makes TSAN report a race only when at least one side is in instrumented
+          # code -- exactly what we want to verify. It drops embree/TBB's internal
+          # init and process-teardown false positives (e.g. a TBB worker's
+          # `operator new` racing the main thread's `__cxa_finalize` free at exit,
+          # whose racy frames are in libc/libstdc++ and so escaped the
+          # `called_from_lib` suppressions). A genuine race in this crate's
+          # callback/closure handling is instrumented on both sides and is still
+          # reported. The suppressions file is kept as defense-in-depth.
+          TSAN_OPTIONS: "suppressions=${{ github.workspace }}/tsan-suppressions.txt ignore_noninstrumented_modules=1"
         run: >
           cargo test -Zbuild-std --target x86_64-unknown-linux-gnu
           --test callback_concurrency --test concurrent_bounds --test bvh_builder --test collide
           --test arc_scene_concurrent
-          -- --test-threads=1
   # Hard gate: ASan instruments this crate's code, so a use-after-free / OOB in
   # our FFI usage fails the build regardless of embree being uninstrumented. (LSan
   # leak reports rooted in embree/oneTBB are suppressed -- see lsan-suppressions.txt;
