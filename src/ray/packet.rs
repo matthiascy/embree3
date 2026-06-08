@@ -138,44 +138,60 @@ macro_rules! impl_ray_packets {
             }
 
             impl SoARay for $t {
+                #[inline]
                 fn org(&self, i: usize) -> [f32; 3] { [self.org_x[i], self.org_y[i], self.org_z[i]] }
 
+                #[inline]
                 fn set_org(&mut self, i: usize, o: [f32; 3]) {
                     self.org_x[i] = o[0];
                     self.org_y[i] = o[1];
                     self.org_z[i] = o[2];
                 }
 
+                #[inline]
                 fn tnear(&self, i: usize) -> f32 { self.tnear[i] }
 
+                #[inline]
                 fn set_tnear(&mut self, i: usize, t: f32) { self.tnear[i] = t }
 
+                #[inline]
                 fn dir(&self, i: usize) -> [f32; 3] { [self.dir_x[i], self.dir_y[i], self.dir_z[i]] }
 
+                #[inline]
                 fn set_dir(&mut self, i: usize, d: [f32; 3]) {
                     self.dir_x[i] = d[0];
                     self.dir_y[i] = d[1];
                     self.dir_z[i] = d[2];
                 }
 
+                #[inline]
                 fn time(&self, i: usize) -> f32 { self.time[i] }
 
+                #[inline]
                 fn set_time(&mut self, i: usize, t: f32) { self.time[i] = t }
 
+                #[inline]
                 fn tfar(&self, i: usize) -> f32 { self.tfar[i] }
 
+                #[inline]
                 fn set_tfar(&mut self, i: usize, t: f32) { self.tfar[i] = t}
 
+                #[inline]
                 fn mask(&self, i: usize) -> u32 { self.mask[i] }
 
+                #[inline]
                 fn set_mask(&mut self, i: usize, m: u32) { self.mask[i] = m }
 
+                #[inline]
                 fn id(&self, i: usize) -> u32 { self.id[i] }
 
+                #[inline]
                 fn set_id(&mut self, i: usize, id: u32) { self.id[i] = id }
 
+                #[inline]
                 fn flags(&self, i: usize) -> u32 { self.flags[i] }
 
+                #[inline]
                 fn set_flags(&mut self, i: usize, f: u32) { self.flags[i] = f }
             }
         )*
@@ -218,8 +234,10 @@ macro_rules! impl_hit_packets {
             }
 
             impl SoAHit for $t {
+                #[inline]
                 fn normal(&self, i: usize) -> [f32; 3] { [self.Ng_x[i], self.Ng_y[i], self.Ng_z[i]] }
 
+                #[inline]
                 fn unit_normal(&self, i: usize) -> [f32; 3] {
                     let n = self.normal(i);
                     let len = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
@@ -231,38 +249,50 @@ macro_rules! impl_hit_packets {
                     }
                 }
 
+                #[inline]
                 fn set_normal(&mut self, i: usize, n: [f32; 3]) {
                     self.Ng_x[i] = n[0];
                     self.Ng_y[i] = n[1];
                     self.Ng_z[i] = n[2];
                 }
 
+                #[inline]
                 fn u(&self, i: usize) -> f32 { self.u[i] }
 
+                #[inline]
                 fn v(&self, i: usize) -> f32 { self.v[i] }
 
+                #[inline]
                 fn uv(&self, i: usize) -> [f32; 2] { [self.u[i], self.v[i]] }
 
+                #[inline]
                 fn set_u(&mut self, i: usize, u: f32) { self.u[i] = u; }
 
+                #[inline]
                 fn set_v(&mut self, i: usize, v: f32) { self.v[i] = v; }
 
+                #[inline]
                 fn set_uv(&mut self, i: usize, uv: [f32; 2]) {
                     self.u[i] = uv[0];
                     self.v[i] = uv[1];
                 }
 
-
+                #[inline]
                 fn prim_id(&self, i: usize) -> u32 { self.primID[i] }
 
+                #[inline]
                 fn set_prim_id(&mut self, i: usize, id: u32) { self.primID[i] = id; }
 
+                #[inline]
                 fn geom_id(&self, i: usize) -> u32 { self.geomID[i] }
 
+                #[inline]
                 fn set_geom_id(&mut self, i: usize, id: u32) { self.geomID[i] = id; }
 
+                #[inline]
                 fn inst_id(&self, i: usize) -> u32 { self.instID[0][i] }
 
+                #[inline]
                 fn set_inst_id(&mut self, i: usize, id: u32) { self.instID[0][i] = id; }
             }
         )*
@@ -319,6 +349,7 @@ impl<'a> RayN<'a> {
 }
 
 impl<'a> SoARay for RayN<'a> {
+    #[inline]
     fn org(&self, i: usize) -> [f32; 3] {
         assert!(i < self.len, "index out of bounds");
         unsafe {
@@ -331,6 +362,7 @@ impl<'a> SoARay for RayN<'a> {
         }
     }
 
+    #[inline]
     fn set_org(&mut self, i: usize, o: [f32; 3]) {
         assert!(i < self.len, "index out of bounds");
         unsafe {
@@ -341,6 +373,7 @@ impl<'a> SoARay for RayN<'a> {
         }
     }
 
+    #[inline]
     fn dir(&self, i: usize) -> [f32; 3] {
         assert!(i < self.len, "index out of bounds");
         unsafe {
@@ -353,6 +386,7 @@ impl<'a> SoARay for RayN<'a> {
         }
     }
 
+    #[inline]
     fn set_dir(&mut self, i: usize, d: [f32; 3]) {
         assert!(i < self.len, "index out of bounds");
         unsafe {
@@ -363,11 +397,13 @@ impl<'a> SoARay for RayN<'a> {
         }
     }
 
+    #[inline]
     fn tnear(&self, i: usize) -> f32 {
         assert!(i < self.len, "index out of bounds");
         unsafe { *(self.ptr as *const f32).add(3 * self.len + i) }
     }
 
+    #[inline]
     fn set_tnear(&mut self, i: usize, t: f32) {
         assert!(i < self.len, "index out of bounds");
         unsafe {
@@ -375,11 +411,13 @@ impl<'a> SoARay for RayN<'a> {
         }
     }
 
+    #[inline]
     fn tfar(&self, i: usize) -> f32 {
         assert!(i < self.len, "index out of bounds");
         unsafe { *(self.ptr as *const f32).add(8 * self.len + i) }
     }
 
+    #[inline]
     fn set_tfar(&mut self, i: usize, t: f32) {
         assert!(i < self.len, "index out of bounds");
         unsafe {
@@ -387,11 +425,13 @@ impl<'a> SoARay for RayN<'a> {
         }
     }
 
+    #[inline]
     fn time(&self, i: usize) -> f32 {
         assert!(i < self.len, "index out of bounds");
         unsafe { *(self.ptr as *const f32).add(7 * self.len + i) }
     }
 
+    #[inline]
     fn set_time(&mut self, i: usize, t: f32) {
         assert!(i < self.len, "index out of bounds");
         unsafe {
@@ -399,11 +439,13 @@ impl<'a> SoARay for RayN<'a> {
         }
     }
 
+    #[inline]
     fn mask(&self, i: usize) -> u32 {
         assert!(i < self.len, "index out of bounds");
         unsafe { *(self.ptr as *const u32).add(9 * self.len + i) }
     }
 
+    #[inline]
     fn set_mask(&mut self, i: usize, m: u32) {
         assert!(i < self.len, "index out of bounds");
         unsafe {
@@ -411,11 +453,13 @@ impl<'a> SoARay for RayN<'a> {
         }
     }
 
+    #[inline]
     fn id(&self, i: usize) -> u32 {
         assert!(i < self.len, "index out of bounds");
         unsafe { *(self.ptr as *const u32).add(10 * self.len + i) }
     }
 
+    #[inline]
     fn set_id(&mut self, i: usize, id: u32) {
         assert!(i < self.len, "index out of bounds");
         unsafe {
@@ -423,11 +467,13 @@ impl<'a> SoARay for RayN<'a> {
         }
     }
 
+    #[inline]
     fn flags(&self, i: usize) -> u32 {
         assert!(i < self.len, "index out of bounds");
         unsafe { *(self.ptr as *const u32).add(11 * self.len + i) }
     }
 
+    #[inline]
     fn set_flags(&mut self, i: usize, f: u32) {
         assert!(i < self.len, "index out of bounds");
         unsafe {
@@ -496,6 +542,7 @@ pub struct HitN<'a> {
 }
 
 impl<'a> SoAHit for HitN<'a> {
+    #[inline]
     fn normal(&self, i: usize) -> [f32; 3] {
         assert!(i < self.len, "index out of bounds");
         unsafe {
@@ -507,8 +554,10 @@ impl<'a> SoAHit for HitN<'a> {
         }
     }
 
+    #[inline]
     fn unit_normal(&self, i: usize) -> [f32; 3] { normalise_vector3(self.normal(i)) }
 
+    #[inline]
     fn set_normal(&mut self, i: usize, n: [f32; 3]) {
         assert!(i < self.len, "index out of bounds");
         unsafe {
@@ -519,6 +568,7 @@ impl<'a> SoAHit for HitN<'a> {
         }
     }
 
+    #[inline]
     fn uv(&self, i: usize) -> [f32; 2] {
         assert!(i < self.len, "index out of bounds");
         unsafe {
@@ -529,16 +579,19 @@ impl<'a> SoAHit for HitN<'a> {
         }
     }
 
+    #[inline]
     fn u(&self, i: usize) -> f32 {
         assert!(i < self.len, "index out of bounds");
         unsafe { *(self.ptr as *const f32).add(3 * self.len + i) }
     }
 
+    #[inline]
     fn v(&self, i: usize) -> f32 {
         assert!(i < self.len, "index out of bounds");
         unsafe { *(self.ptr as *const f32).add(4 * self.len + i) }
     }
 
+    #[inline]
     fn set_uv(&mut self, i: usize, uv: [f32; 2]) {
         assert!(i < self.len, "index out of bounds");
         unsafe {
@@ -548,6 +601,7 @@ impl<'a> SoAHit for HitN<'a> {
         }
     }
 
+    #[inline]
     fn set_u(&mut self, i: usize, u: f32) {
         assert!(i < self.len, "index out of bounds");
         unsafe {
@@ -555,6 +609,7 @@ impl<'a> SoAHit for HitN<'a> {
         }
     }
 
+    #[inline]
     fn set_v(&mut self, i: usize, v: f32) {
         assert!(i < self.len, "index out of bounds");
         unsafe {
@@ -562,11 +617,13 @@ impl<'a> SoAHit for HitN<'a> {
         }
     }
 
+    #[inline]
     fn prim_id(&self, i: usize) -> u32 {
         assert!(i < self.len, "index out of bounds");
         unsafe { *(self.ptr as *const u32).add(5 * self.len + i) }
     }
 
+    #[inline]
     fn set_prim_id(&mut self, i: usize, id: u32) {
         assert!(i < self.len, "index out of bounds");
         unsafe {
@@ -574,11 +631,13 @@ impl<'a> SoAHit for HitN<'a> {
         }
     }
 
+    #[inline]
     fn geom_id(&self, i: usize) -> u32 {
         assert!(i < self.len, "index out of bounds");
         unsafe { *(self.ptr as *const u32).add(6 * self.len + i) }
     }
 
+    #[inline]
     fn set_geom_id(&mut self, i: usize, id: u32) {
         assert!(i < self.len, "index out of bounds");
         unsafe {
@@ -586,11 +645,13 @@ impl<'a> SoAHit for HitN<'a> {
         }
     }
 
+    #[inline]
     fn inst_id(&self, i: usize) -> u32 {
         assert!(i < self.len, "index out of bounds");
         unsafe { *(self.ptr as *const u32).add(7 * self.len + i) }
     }
 
+    #[inline]
     fn set_inst_id(&mut self, i: usize, id: u32) {
         assert!(i < self.len, "index out of bounds");
         unsafe {

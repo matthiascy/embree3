@@ -10,20 +10,28 @@ use crate::sys::*;
 /// two types are valid). The corresponding pattern in C is called poor man's
 /// inheritance. See [`IntersectContextExt`] for an example of how to do this
 pub unsafe trait AsIntersectContext {
+    /// The per-ray extension payload carried alongside the base context: `()`
+    /// for a plain [`IntersectContext`], `E` for an [`IntersectContextExt<E>`].
     type Ext;
 
+    /// The base [`IntersectContext`] embree carries through to callbacks.
     fn as_context(&self) -> &IntersectContext;
+    /// Mutable [`as_context`](Self::as_context).
     fn as_mut_context(&mut self) -> &mut IntersectContext;
 
+    /// Raw `*const` to the base context, for the FFI query call.
     fn as_context_ptr(&self) -> *const IntersectContext {
         self.as_context() as *const IntersectContext
     }
 
+    /// Raw `*mut` to the base context, for the FFI query call.
     fn as_mut_context_ptr(&mut self) -> *mut IntersectContext {
         self.as_mut_context() as *mut IntersectContext
     }
 
+    /// The extension payload, if any (`None` for a plain context).
     fn as_extended(&self) -> Option<&Self::Ext>;
+    /// Mutable [`as_extended`](Self::as_extended).
     fn as_mut_extended(&mut self) -> Option<&mut Self::Ext>;
 }
 
@@ -81,6 +89,8 @@ impl IntersectContext {
         IntersectContext::new(RTCIntersectContextFlags::INCOHERENT)
     }
 
+    /// Create a context with the given traversal `flags`. For the common cases
+    /// use [`coherent`](Self::coherent) / [`incoherent`](Self::incoherent).
     pub fn new(flags: RTCIntersectContextFlags) -> IntersectContext {
         RTCIntersectContext {
             flags,
@@ -153,7 +163,10 @@ pub struct IntersectContextExt<E>
 where
     E: Sized,
 {
+    /// The base context embree carries through to callbacks.
     pub ctx: IntersectContext,
+    /// The per-ray extension payload, recovered inside callbacks via the
+    /// `unsafe` [`IntersectContext::ext`] / [`IntersectContext::ext_mut`].
     pub ext: E,
 }
 
@@ -190,6 +203,8 @@ impl<E> IntersectContextExt<E>
 where
     E: Sized,
 {
+    /// Create an extended context with traversal `flags` and the per-ray
+    /// extension payload `extra`.
     pub fn new(flags: RTCIntersectContextFlags, extra: E) -> IntersectContextExt<E> {
         IntersectContextExt {
             ctx: IntersectContext::new(flags),
@@ -197,6 +212,7 @@ where
         }
     }
 
+    /// Extended context with the coherent traversal flag and payload `extra`.
     pub fn coherent(extra: E) -> IntersectContextExt<E> {
         IntersectContextExt {
             ctx: IntersectContext::coherent(),
@@ -204,6 +220,7 @@ where
         }
     }
 
+    /// Extended context with the incoherent traversal flag and payload `extra`.
     pub fn incoherent(extra: E) -> IntersectContextExt<E> {
         IntersectContextExt {
             ctx: IntersectContext::incoherent(),

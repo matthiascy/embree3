@@ -52,7 +52,6 @@ pub(crate) enum AttachedBuffer<'buf> {
         layout: BufferLayout,
     },
     Local {
-        ptr: *mut c_void,
         size: BufferSize,
         layout: BufferLayout,
     },
@@ -69,11 +68,23 @@ pub(crate) enum AttachedBuffer<'buf> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum CbKind {
+    /// The intersect filter function
+    /// ([`GeometryBuilder::set_intersect_filter_function`]).
     IntersectFilter,
+    /// The occluded filter function
+    /// ([`GeometryBuilder::set_occluded_filter_function`]).
     OccludedFilter,
+    /// The user-geometry intersect function
+    /// ([`GeometryBuilder::set_intersect_function`]).
     UserIntersect,
+    /// The user-geometry occluded function
+    /// ([`GeometryBuilder::set_occluded_function`]).
     UserOccluded,
+    /// The user-geometry bounds function
+    /// ([`GeometryBuilder::set_bounds_function`]).
     UserBounds,
+    /// The displacement function
+    /// ([`GeometryBuilder::set_displacement_function`]).
     Displacement,
 }
 
@@ -217,7 +228,7 @@ impl<'buf> GeometryShared<'buf> {
                 data,
                 layout: *layout,
             },
-            AttachedBuffer::Local { size, layout, .. } => BufferSource::Local {
+            AttachedBuffer::Local { size, layout } => BufferSource::Local {
                 size: *size,
                 layout: *layout,
             },
@@ -599,7 +610,6 @@ impl<'buf> GeometryBuilder<'buf> {
         self.shared.attachments.lock().unwrap().insert(
             (usage, slot),
             AttachedBuffer::Local {
-                ptr: raw_ptr,
                 size: BufferSize::new(size).ok_or(Error::INVALID_ARGUMENT)?,
                 layout,
             },
@@ -2388,21 +2398,34 @@ impl<'buf> Geometry<'buf> {
 
 /// The arguments for the `Geometry::interpolate` function.
 pub struct InterpolateInput {
+    /// Primitive to interpolate within.
     pub prim_id: u32,
+    /// First barycentric / parametric coordinate.
     pub u: f32,
+    /// Second barycentric / parametric coordinate.
     pub v: f32,
+    /// Which buffer to interpolate (e.g. `VERTEX` or `VERTEX_ATTRIBUTE`).
     pub usage: BufferUsage,
+    /// Buffer slot to interpolate.
     pub slot: u32,
 }
 
 /// The arguments for the `Geometry::interpolate_n` function.
 pub struct InterpolateNInput<'a> {
+    /// Optional per-element validity mask (`-1` valid, `0` skip); `None` runs
+    /// all elements.
     pub valid: Option<Cow<'a, [u32]>>,
+    /// Primitive index per element.
     pub prim_id: Cow<'a, [u32]>,
+    /// First coordinate per element.
     pub u: Cow<'a, [f32]>,
+    /// Second coordinate per element.
     pub v: Cow<'a, [f32]>,
+    /// Which buffer to interpolate.
     pub usage: BufferUsage,
+    /// Buffer slot to interpolate.
     pub slot: u32,
+    /// Number of elements.
     pub n: u32,
 }
 
@@ -3679,6 +3702,8 @@ impl<'a> Vertices<'a> {
     }
 }
 
+/// Mutable iterator over a geometry's [`Vertices`], yielding each vertex in
+/// turn.
 pub struct VerticesIterMut<'a> {
     inner: Vertices<'a>,
     cur: usize,
@@ -3729,6 +3754,7 @@ pub struct ValidityN<'a> {
     marker: PhantomData<&'a [i32]>,
 }
 
+/// Shared iterator over a [`ValidityN`]'s lanes, yielding each lane's flag.
 pub struct ValidityNIter<'a, 'b> {
     inner: &'b ValidityN<'a>,
     cur: usize,

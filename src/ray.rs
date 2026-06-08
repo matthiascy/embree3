@@ -85,18 +85,22 @@ impl Ray {
     }
 
     /// Returns the origin of the ray.
+    #[inline]
     pub fn org(&self) -> [f32; 3] { [self.org_x, self.org_y, self.org_z] }
 
     /// Returns the direction (un-normalized) of the ray.
+    #[inline]
     pub fn dir(&self) -> [f32; 3] { [self.dir_x, self.dir_y, self.dir_z] }
 
     /// Returns the normalized direction of the ray.
     ///
     /// Do not use this method to calculate the hit point, use
     /// [`dir`](Self::dir) instead.
+    #[inline]
     pub fn unit_dir(&self) -> [f32; 3] { normalise_vector3(self.dir()) }
 
     /// Calculates the hit point from the ray and the hit distance.
+    #[inline]
     pub fn hit_point(&self) -> [f32; 3] {
         let t = self.tfar;
         [
@@ -141,6 +145,23 @@ impl Default for Ray {
 /// The parametric intersection distance is not stored inside the hit,
 /// but stored inside the `tfar`([`sys::RTCRay::tfar`]) member of the ray.
 ///
+/// # Triangle UV convention
+///
+/// For a triangle with vertices `p0`, `p1`, `p2` (in index-buffer order), `u`
+/// and `v` are barycentric coordinates that reconstruct the hit point as
+///
+/// ```text
+/// P = (1 - u - v) * p0  +  u * p1  +  v * p2
+/// ```
+///
+/// so `u` is the weight of `p1`, `v` the weight of `p2`, and `1 - u - v` the
+/// weight of `p0`. Hence `(u, v) = (0, 0)` is `p0`, `(1, 0)` is `p1`, and
+/// `(0, 1)` is `p2`, and `u + v <= 1` inside the triangle. The same `(u, v)`
+/// interpolate any per-vertex attribute through
+/// [`Geometry::interpolate`](crate::Geometry::interpolate). Other geometry
+/// types (quads, subdivision surfaces, curves) define their own `u`/`v`
+/// parametrization.
+///
 /// There exists structures in SOA (structure of array) layout for hit packets
 /// of size 4 ([`Hit4`]), size 8 ([`Hit8`]), and size 16 ([`Hit16`]).
 ///
@@ -164,12 +185,20 @@ impl Default for Hit {
 
 impl Hit {
     /// Returns the normal at the hit point (un-normalized).
+    #[inline]
     pub fn normal(&self) -> [f32; 3] { [self.Ng_x, self.Ng_y, self.Ng_z] }
 
     /// Returns the normalized normal at the hit point.
+    #[inline]
     pub fn unit_normal(&self) -> [f32; 3] { normalise_vector3(self.normal()) }
 
-    /// Returns the barycentric u/v coordinates of the hit.
+    /// Returns the barycentric `(u, v)` coordinates of the hit.
+    ///
+    /// For a triangle these reconstruct the hit point as
+    /// `(1 - u - v) * p0 + u * p1 + v * p2` over the primitive's vertices
+    /// `p0`, `p1`, `p2` (index-buffer order); see the [`Hit`] type docs for the
+    /// full convention.
+    #[inline]
     pub fn barycentric(&self) -> [f32; 2] { [self.u, self.v] }
 
     /// Returns if the hit is valid, i.e. the ray hit something.

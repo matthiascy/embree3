@@ -4,6 +4,12 @@ use std::{
     marker::PhantomData,
 };
 
+/// Per-lane accessors for a ray packet in structure-of-arrays (SoA) layout.
+///
+/// Each method reads or writes one field of the ray at lane `i` (origin,
+/// direction, `tnear`/`tfar`, `time`, `mask`, `id`, `flags`); `i` must be in
+/// `0..len`. Implemented by the `4`/`8`/`16`-wide ray packets and the
+/// runtime-sized [`RayN`](crate::RayN).
 pub trait SoARay {
     fn org(&self, i: usize) -> [f32; 3];
     fn set_org(&mut self, i: usize, o: [f32; 3]);
@@ -35,6 +41,12 @@ pub trait SoARay {
     fn set_flags(&mut self, i: usize, flags: u32);
 }
 
+/// Per-lane accessors for a hit packet in structure-of-arrays (SoA) layout.
+///
+/// Each method reads or writes one field of the hit at lane `i` (geometric
+/// normal, `u`/`v`, `primID`/`geomID`/`instID`); `i` must be in `0..len`.
+/// Implemented by the `4`/`8`/`16`-wide hit packets and the runtime-sized
+/// [`HitN`](crate::HitN).
 pub trait SoAHit {
     fn normal(&self, i: usize) -> [f32; 3];
 
@@ -46,6 +58,9 @@ pub trait SoAHit {
 
     fn v(&self, i: usize) -> f32;
 
+    /// Lane `i`'s barycentric `(u, v)`. For a triangle the hit point is
+    /// `(1 - u - v) * p0 + u * p1 + v * p2` over the primitive's vertices
+    /// `p0`, `p1`, `p2`; see [`Hit`](crate::Hit) for the full convention.
     fn uv(&self, i: usize) -> [f32; 2];
 
     fn set_u(&mut self, i: usize, u: f32);

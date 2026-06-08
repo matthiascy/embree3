@@ -108,8 +108,11 @@ unsafe impl<T: BufferData, const N: usize> BufferData for [T; N] {}
 /// [`Geometry::get_buffer`](crate::Geometry::get_buffer).
 #[derive(Debug, Clone, Copy)]
 pub struct BufferLayout {
+    /// Element format of the bound data.
     pub format: Format,
+    /// Byte stride between consecutive elements.
     pub stride: usize,
+    /// Number of elements.
     pub count: usize,
 }
 
@@ -123,19 +126,26 @@ pub enum BufferSource<'a> {
     /// reference would dangle once the geometry's internal lock guard
     /// drops).
     Managed {
+        /// The refcounted buffer (a retained clone).
         buffer: Buffer,
+        /// Byte offset of the bound sub-range within `buffer`.
         byte_offset: usize,
+        /// How embree reads the bound bytes.
         layout: BufferLayout,
     },
     /// Caller-owned host memory shared zero-copy with embree.
     Shared {
+        /// The caller-owned host bytes shared with embree.
         data: &'a [u8],
+        /// How embree reads the bound bytes.
         layout: BufferLayout,
     },
     /// Embree-owned, geometry-local storage. Opaque (no raw pointer exposed);
     /// read it via the geometry's mapping methods.
     Local {
+        /// Size of the embree-owned storage.
         size: BufferSize,
+        /// How embree reads the bound bytes.
         layout: BufferLayout,
     },
 }

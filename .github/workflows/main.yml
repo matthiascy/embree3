@@ -7,11 +7,9 @@ jobs:
   check_format:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly
-          override: true
           components: rustfmt
       - name: Format Core
         run: cargo fmt -- --check
@@ -20,7 +18,7 @@ jobs:
   miri:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Install Miri
         run: |
           rustup toolchain install nightly --component miri
@@ -40,11 +38,9 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly
-          override: true
           components: rust-src
       - run: wget https://github.com/embree/embree/releases/download/v${EMBREE_VERSION}/embree-${EMBREE_VERSION}.x86_64.linux.tar.gz
       - run: tar -xf embree-${EMBREE_VERSION}.x86_64.linux.tar.gz
@@ -68,11 +64,9 @@ jobs:
   address_sanitizer:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly
-          override: true
           components: rust-src
       - run: wget https://github.com/embree/embree/releases/download/v${EMBREE_VERSION}/embree-${EMBREE_VERSION}.x86_64.linux.tar.gz
       - run: tar -xf embree-${EMBREE_VERSION}.x86_64.linux.tar.gz
@@ -98,14 +92,15 @@ jobs:
   build_linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - run: wget https://github.com/embree/embree/releases/download/v${EMBREE_VERSION}/embree-${EMBREE_VERSION}.x86_64.linux.tar.gz
       - run: tar -xf embree-${EMBREE_VERSION}.x86_64.linux.tar.gz
-      - run: source embree-${EMBREE_VERSION}.x86_64.linux/embree-vars.sh
       - run: echo "EMBREE_DIR=`pwd`/embree-${EMBREE_VERSION}.x86_64.linux/" >> $GITHUB_ENV
+      # `source embree-vars.sh` would only set LD_LIBRARY_PATH for that one step's
+      # shell; persist it via $GITHUB_ENV so the test binaries can load
+      # libembree3.so.3 at runtime in the `cargo test` step.
+      - run: echo "LD_LIBRARY_PATH=`pwd`/embree-${EMBREE_VERSION}.x86_64.linux/lib" >> $GITHUB_ENV
       - run: cargo build
       - run: cargo test
       - run: cargo doc
@@ -121,11 +116,10 @@ jobs:
   compile_fail:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.96.0
-          override: true
       - run: wget https://github.com/embree/embree/releases/download/v${EMBREE_VERSION}/embree-${EMBREE_VERSION}.x86_64.linux.tar.gz
       - run: tar -xf embree-${EMBREE_VERSION}.x86_64.linux.tar.gz
       - run: echo "EMBREE_DIR=`pwd`/embree-${EMBREE_VERSION}.x86_64.linux/" >> $GITHUB_ENV
@@ -135,12 +129,15 @@ jobs:
           RUN_UI_TESTS: "1"
         run: cargo test --test compile_fail
   build_mac:
-    runs-on: macos-latest
+    # Embree 3.13.5 ships only an x86_64 macOS binary, but `macos-latest` is now
+    # arm64 (Apple Silicon) -- linking the x86_64 dylib into an arm64 build fails
+    # ("found architecture 'x86_64', required architecture 'arm64'"). Pin to the
+    # Intel runner so the architectures match. (Embree 3.x has no native arm64
+    # mac binary; arm64 CI would need an Embree 4.x or a from-source build.)
+    runs-on: macos-13
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - run: wget https://github.com/embree/embree/releases/download/v${EMBREE_VERSION}/embree-${EMBREE_VERSION}.x86_64.macosx.zip
       - run: unzip embree-${EMBREE_VERSION}.x86_64.macosx.zip
       - run: source embree-${EMBREE_VERSION}.x86_64.macosx/embree-vars.sh
@@ -151,10 +148,8 @@ jobs:
   build_windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - run: choco install wget
       - run: wget https://github.com/embree/embree/releases/download/v${env:EMBREE_VERSION}/embree-${env:EMBREE_VERSION}.x64.vc14.windows.zip
       - run: 7z x embree-${env:EMBREE_VERSION}.x64.vc14.windows.zip -y

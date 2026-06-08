@@ -48,13 +48,17 @@ unsafe impl Send for Device {}
 unsafe impl Sync for Device {}
 
 impl Device {
+    /// Create a device with the default configuration (and the default error
+    /// reporter enabled). The entry point of the crate.
     pub fn new() -> Result<Device, Error> { create_device(None, true) }
 
+    /// Create a device with embree verbose logging (`verbose=4`) enabled.
     pub fn debug() -> Result<Device, Error> {
         let cfg = CString::new("verbose=4").unwrap();
         create_device(Some(cfg), true)
     }
 
+    /// Create a device from an explicit [`Config`].
     pub fn with_config(config: Config) -> Result<Device, Error> {
         let cfg = config.to_c_string();
         create_device(Some(cfg), config.report_errors)
@@ -278,10 +282,15 @@ impl Device {
 /// Instruction Set Architecture.
 #[derive(Debug, Clone, Copy)]
 pub enum Isa {
+    /// SSE2.
     Sse2,
+    /// SSE4.2.
     Sse4_2,
+    /// AVX.
     Avx,
+    /// AVX2.
     Avx2,
+    /// AVX-512.
     Avx512,
 }
 
@@ -433,15 +442,27 @@ impl Default for Config {
 pub fn enable_ftz_and_daz() {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
-        #[cfg(target_arch = "x86")]
-        use std::arch::x86::{_mm_getcsr, _mm_setcsr, _MM_FLUSH_ZERO_MASK};
-        #[cfg(target_arch = "x86_64")]
-        use std::arch::x86_64::{_mm_getcsr, _mm_setcsr, _MM_FLUSH_ZERO_MASK};
+        use std::arch::asm;
 
-        let flag = _MM_FLUSH_ZERO_MASK | 0x0040;
+        // FTZ (flush-to-zero, bit 15 = `_MM_FLUSH_ZERO_MASK`) and DAZ
+        // (denormals-are-zero, bit 6) of the SSE control/status register MXCSR.
+        const FTZ_DAZ: u32 = 0x8000 | 0x0040;
+
+        // `_mm_getcsr` / `_mm_setcsr` are deprecated, so read-modify-write MXCSR
+        // with the `stmxcsr` / `ldmxcsr` instructions directly (both take an
+        // `m32` operand, so the value is passed by pointer). We OR the flags in
+        // rather than overwrite, to preserve the rounding mode and exception
+        // masks in the other bits.
+        let mut mxcsr: u32 = 0;
         unsafe {
-            let csr = (_mm_getcsr() & !flag) | flag;
-            _mm_setcsr(csr);
+            // Store the current MXCSR into `mxcsr`. Writes memory, so no
+            // `readonly`/`nomem`; `stmxcsr` does not touch the flags register.
+            asm!("stmxcsr [{ptr}]", ptr = in(reg) &mut mxcsr, options(nostack, preserves_flags));
+            mxcsr |= FTZ_DAZ;
+            // Load the updated value back into MXCSR. Only reads our memory
+            // (the MXCSR change is a non-memory CPU-state side effect), hence
+            // `readonly`.
+            asm!("ldmxcsr [{ptr}]", ptr = in(reg) &mxcsr, options(nostack, readonly, preserves_flags));
         }
     }
 }

@@ -1,8 +1,62 @@
 //! [![Crates.io](https://img.shields.io/crates/v/embree3.svg)](https://crates.io/crates/embree3)
 //! [![CI](https://github.com/matthiascy/embree3/actions/workflows/main.yml/badge.svg)](https://github.com/matthiascy/embree3/actions/workflows/main.yml)
 //!
-//! Rust bindings to [Embree](http://embree.github.io/). These are still in
-//! development, so a range of features are in progress.
+//! Safe Rust bindings to [Embree](https://embree.github.io/) 3.13.5, Intel's
+//! high-performance ray-tracing kernels.
+//!
+//! This crate is a thin `unsafe` FFI wrapper whose one job is to turn Embree's
+//! raw pointers and C callbacks into a memory-safe Rust API: callback closures
+//! are heap-owned and reached through a lock-free per-geometry table; geometry
+//! mutation is gated by the [`GeometryBuilder`] / [`Geometry`] typestate; and
+//! [`Scene`] is a non-`Clone` unique owner of its handle (share a committed one
+//! across threads with `Arc<Scene>`).
+//!
+//! # Overview
+//!
+//! - [`Device`] is the entry point. From it you create a [`Scene`], a geometry
+//!   builder ([`Device::create_geometry`]), or a standalone BVH
+//!   ([`Device::create_bvh`]).
+//! - Configure a [`GeometryBuilder`] (buffers, callbacks), [`commit`] it to a
+//!   shareable read-only [`Geometry`], attach it to a [`Scene`], and commit the
+//!   scene.
+//! - Query the scene with [`Scene::intersect`] / [`Scene::occluded`] (single
+//!   rays), their `4` / `8` / `16`-wide packet variants, the stream APIs, or
+//!   [`Scene::point_query`]; find scene-vs-scene candidate pairs with
+//!   [`Scene::collide`].
+//!
+//! [`commit`]: GeometryBuilder::commit
+//!
+//! # Quick start
+//!
+//! ```no_run
+//! use embree3::{BufferUsage, Device, Format, GeometryKind, IntersectContext, Ray, RayHit};
+//!
+//! let device = Device::new().unwrap();
+//! let mut scene = device.create_scene().unwrap();
+//!
+//! // One triangle.
+//! let mut tri = device.create_geometry(GeometryKind::TRIANGLE).unwrap();
+//! tri.set_new_buffer::<[f32; 3]>(BufferUsage::VERTEX, 0, Format::FLOAT3, 3 * 4, 3)
+//!     .unwrap()
+//!     .copy_from_slice(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
+//! tri.set_new_buffer::<[u32; 3]>(BufferUsage::INDEX, 0, Format::UINT3, 3 * 4, 1)
+//!     .unwrap()
+//!     .copy_from_slice(&[[0, 1, 2]]);
+//! let tri = tri.commit();
+//! scene.attach_geometry(&tri);
+//! scene.commit();
+//!
+//! // Trace one ray at it.
+//! let mut ctx = IntersectContext::coherent();
+//! let mut rayhit = RayHit::from(Ray::segment(
+//!     [0.25, 0.25, -1.0],
+//!     [0.0, 0.0, 1.0],
+//!     0.0,
+//!     f32::INFINITY,
+//! ));
+//! scene.intersect(&mut ctx, &mut rayhit);
+//! assert!(rayhit.hit.is_valid());
+//! ```
 //!
 //! # Documentation
 //!
@@ -64,6 +118,7 @@ mod scene;
 #[allow(non_upper_case_globals)]
 #[allow(non_camel_case_types)]
 #[allow(non_snake_case)]
+#[allow(missing_docs)]
 pub mod sys;
 
 pub use buffer::*;
@@ -76,6 +131,10 @@ pub use scene::*;
 
 // Pull in some cleaned up enum and bitfield types directly,
 // with prettier aliases
+
+/// An axis-aligned bounding box, given by its `lower` and `upper` corners.
+/// Returned by [`Scene::get_bounds`] and filled in by user-geometry bounds
+/// callbacks.
 pub type Bounds = sys::RTCBounds;
 
 /// Linear (motion-blur) bounds: the axis-aligned bounding box at the start
@@ -109,14 +168,39 @@ pub type LinearBounds = sys::RTCLinearBounds;
 /// [`BufferUsage::FLAGS`] can get used to add additional flag per primitive of
 /// a geometry, and is currently only used for linear curves.
 pub type BufferUsage = sys::RTCBufferType;
+
+/// Speed-vs-quality trade-off for a scene or BVH build (see
+/// [`Scene::set_build_quality`] and [`BuildConfig`]).
 pub type BuildQuality = sys::RTCBuildQuality;
+
+/// Flags controlling a standalone BVH build (e.g. dynamic / refittable). See
+/// [`BuildConfig`].
 pub type BuildFlags = sys::RTCBuildFlags;
+
+/// Per-segment flags for curve geometries (e.g. neighbor joins).
 pub type CurveFlags = sys::RTCCurveFlags;
+
+/// A queryable, read-only device property (see [`Device::get_property`]).
 pub type DeviceProperty = sys::RTCDeviceProperty;
+
+/// An Embree error code. Returned by fallible operations and reported through
+/// the device error callback; see [`Device::get_error`].
 pub type Error = sys::RTCError;
+
+/// The element format of a data buffer, e.g. [`Format::FLOAT3`] for vertex
+/// positions or [`Format::UINT3`] for a triangle index.
 pub type Format = sys::RTCFormat;
+
+/// Flags on an [`IntersectContext`] selecting the traversal mode (e.g. coherent
+/// vs incoherent ray distributions).
 pub type IntersectContextFlags = sys::RTCIntersectContextFlags;
+
+/// Scene-level flags (e.g. `DYNAMIC`, `ROBUST`, `COMPACT`); see
+/// [`Scene::set_flags`].
 pub type SceneFlags = sys::RTCSceneFlags;
+
+/// Subdivision mode for subdivision-surface geometries (how the limit surface
+/// is evaluated near boundaries and creases).
 pub type SubdivisionMode = sys::RTCSubdivisionMode;
 /// The type of a geometry, used to determine which geometry type to create.
 pub type GeometryKind = sys::RTCGeometryType;
@@ -137,7 +221,10 @@ impl<T: Send + Sync + 'static> UserData for T {}
 #[repr(i32)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ValidMask {
+    /// The lane is active: the ray/hit is processed. Embree's `-1`.
     Valid = -1,
+    /// The lane is inactive: the ray/hit is skipped and left untouched.
+    /// Embree's `0`.
     Invalid = 0,
 }
 
@@ -354,6 +441,8 @@ pub struct AlignedVector<T> {
 }
 
 impl<T> AlignedVector<T> {
+    /// Allocate `len` zeroed elements, aligned to at least `align` bytes (and
+    /// at least `T`'s own alignment).
     pub fn zeroed(len: usize, align: usize) -> Self {
         let t_size = mem::size_of::<T>();
         let t_align = mem::align_of::<T>();
@@ -371,6 +460,8 @@ impl<T> AlignedVector<T> {
         }
     }
 
+    /// Allocate `len` elements aligned to at least `align` bytes, each
+    /// initialized to `init`.
     pub fn new_init(len: usize, align: usize, init: T) -> Self
     where
         T: Copy,

@@ -182,7 +182,9 @@ impl<'id, N> Children<'id, N> {
             _m: PhantomData,
         }
     }
+    /// The number of children stored in the node.
     pub fn len(&self) -> usize { self.len }
+    /// Whether the node has no children.
     pub fn is_empty(&self) -> bool { self.len == 0 }
     /// The `i`th child handle, or `None` if out of range.
     pub fn get(&self, i: usize) -> Option<NodePtr<'id, N>> {
@@ -213,10 +215,15 @@ impl<'a> ChildBounds<'a> {
             _m: PhantomData,
         }
     }
+    /// The number of child bounding boxes in the view.
+    #[inline]
     pub fn len(&self) -> usize { self.len }
+    /// Whether the view has no child bounds.
+    #[inline]
     pub fn is_empty(&self) -> bool { self.len == 0 }
     /// The `i`th child's bounds, borrowed from this view, or `None` if out of
     /// range.
+    #[inline]
     pub fn get(&self, i: usize) -> Option<&Bounds> {
         if i >= self.len {
             return None;
@@ -468,17 +475,28 @@ pub trait BvhBuilder: Send + Sync {
 /// Build settings. `Default` reproduces `rtcDefaultBuildArguments`.
 #[derive(Clone, Debug)]
 pub struct BuildConfig {
+    /// Build quality / speed-vs-quality trade-off.
     pub quality: BuildQuality,
     /// Optimize the build for fast *rebuilds* of dynamic scenes, at the cost of
     /// higher memory use (embree's `RTC_BUILD_FLAG_DYNAMIC`). `false`
     /// builds for best query performance.
     pub dynamic: bool,
+    /// Maximum number of children per interior node. Must not exceed the
+    /// builder's [`MAX_CHILDREN`](BvhBuilder::MAX_CHILDREN).
     pub max_branching_factor: u32,
+    /// Maximum depth of the tree.
     pub max_depth: u32,
+    /// Number of primitives per SAH evaluation block.
     pub sah_block_size: u32,
+    /// Minimum number of primitives in a leaf.
     pub min_leaf_size: u32,
+    /// Maximum number of primitives in a leaf.
     pub max_leaf_size: u32,
+    /// Estimated cost of traversing one node, relative to `intersection_cost`
+    /// (tunes the SAH).
     pub traversal_cost: f32,
+    /// Estimated cost of one primitive intersection, relative to
+    /// `traversal_cost` (tunes the SAH).
     pub intersection_cost: f32,
 }
 
