@@ -5,6 +5,26 @@ All notable changes to this crate are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (while `0.x`, a minor
 bump may carry breaking changes).
 
+## [0.4.1] - 2026-06-09
+
+Patch release. No public API or behavior change: this declares a Minimum
+Supported Rust Version and guards it in CI.
+
+### Changed
+
+- Declare `rust-version = "1.78"` (MSRV). The library code itself compiles down
+  to Rust 1.73; the floor is raised to 1.78 by the v4 `Cargo.lock` format
+  (`cargo >= 1.78`), the lowest toolchain the repository builds on.
+
+### Tooling
+
+- Replace two `debug_assert!` uses of `<int>::is_multiple_of` (stabilized in
+  Rust 1.87) with `x % n == 0`, so the crate builds on the declared MSRV, and
+  enable the `clippy::incompatible_msrv` lint to flag any standard-library API
+  newer than `rust-version`.
+- Add a CI `msrv` job that reads `rust-version` from `Cargo.toml` and runs
+  `cargo clippy --lib` pinned to it, failing on `incompatible_msrv`.
+
 ## [0.4.0] - 2026-06-08
 
 First public release of `embree3` since it was forked from

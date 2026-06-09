@@ -47,6 +47,9 @@ cargo build
 cargo test
 ```
 
+The minimum supported Rust version (MSRV) is **1.78**, recorded as
+`rust-version` in `Cargo.toml` and checked by the `msrv` CI job.
+
 ## Documentation
 
 Build the API docs locally with `cargo doc --open`. Embree's own API reference is

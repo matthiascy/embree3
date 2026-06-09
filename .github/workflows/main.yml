@@ -15,6 +15,20 @@ jobs:
         run: cargo fmt -- --check
       - name: Format Examples
         run: scripts/check-examples-formatting.sh
+  msrv:
+    name: msrv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read MSRV from Cargo.toml
+        id: msrv
+        run: echo "version=$(grep -m1 '^rust-version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+          components: clippy
+      - name: Clippy on MSRV (reject APIs newer than rust-version)
+        run: cargo clippy --lib --all-features -- -D clippy::incompatible_msrv
   miri:
     runs-on: ubuntu-latest
     steps:

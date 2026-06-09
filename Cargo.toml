@@ -1,6 +1,6 @@
 [package]
 name = "embree3"
-version = "0.4.0"
+version = "0.4.1"
 authors = [
     "Will Usher <will@willusher.io>",
     "Yang Chen <matthiasychen@gmail.com>",
@@ -15,10 +15,8 @@ keywords = ["embree", "ray-tracing", "graphics", "bvh", "ffi"]
 categories = ["rendering", "api-bindings", "external-ffi-bindings"]
 build = "build.rs"
 edition = "2021"
+rust-version = "1.78"
 
-# Keep the published crate to the library itself: src/, build.rs, tests, benches,
-# README/CHANGELOG/LICENSE. Everything below is local-dev, agent, or CI-only
-# tooling that consumers neither need nor should receive.
 exclude = [
     ".*",
     "*.png",
@@ -30,9 +28,6 @@ exclude = [
 ]
 
 [dependencies]
-# Optional: when enabled, the default error reporter routes embree's asynchronous
-# errors through the `log` facade instead of the stderr fallback. Off by default so
-# the crate stays dependency-free unless the application opts in.
 log = { version = "0.4", optional = true }
 
 [dev-dependencies]
@@ -54,6 +49,9 @@ harness = false
 
 [features]
 log = ["dep:log"]
+
+[lints.clippy]
+incompatible_msrv = "warn"
 
 # docs.rs builds without an Embree install (see the DOCS_RS guard in build.rs);
 # enable all features so every item is documented.
